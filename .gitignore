@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Never commit a real configuration, an index or a call log: they describe or contain mail.
+config.toml
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+audit.log
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

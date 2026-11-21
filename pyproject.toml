@@ -1,0 +1,48 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "thunderbird-local-mcp"
+dynamic = ["version"]
+description = "Read-only MCP server for the local Thunderbird mail store, with a privacy filter that runs before anything is indexed"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+authors = [{ name = "Daniel González Palazón" }]
+keywords = ["mcp", "model-context-protocol", "thunderbird", "email", "mbox", "mork", "privacy"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: End Users/Desktop",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: MacOS",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Communications :: Email",
+]
+dependencies = [
+  "mcp>=2.2,<3",
+  "pypdf>=7.1",
+  "python-docx>=1.2",
+  "openpyxl>=3.1",
+]
+
+[project.urls]
+Homepage = "https://github.com/DanielGP121/thunderbird-local-mcp"
+Issues = "https://github.com/DanielGP121/thunderbird-local-mcp/issues"
+Changelog = "https://github.com/DanielGP121/thunderbird-local-mcp/blob/main/CHANGELOG.md"
+
+[project.scripts]
+thunderbird-local-mcp = "thunderbird_local_mcp.server:main"
+
+[tool.hatch.version]
+path = "src/thunderbird_local_mcp/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/thunderbird_local_mcp"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "tests", "README.md", "CHANGELOG.md", "LICENSE"]
