@@ -41,6 +41,8 @@ senders = {senders}
 subject_regex = {subjects}
 body_regex = []
 whole_thread = true
+[compose]
+attachment_dirs = {dirs}
 """
 
 
@@ -183,9 +185,9 @@ GROUPS = (
 )
 
 
-def write_config(senders='["@journal.example"]', subjects='["invitation to review"]'):
+def write_config(senders='["@journal.example"]', subjects='["invitation to review"]', dirs="[]"):
     Path(os.environ["TB_CONFIG"]).write_text(
-        CONFIG.format(profile=PROFILE.as_posix(), senders=senders, subjects=subjects), encoding="utf-8")
+        CONFIG.format(profile=PROFILE.as_posix(), senders=senders, subjects=subjects, dirs=dirs), encoding="utf-8")
 
 
 def setup_fixture() -> None:
@@ -365,6 +367,80 @@ def test_compose_arguments():
     raises(lambda: s.split_addresses("Name <a@b.org>"), "not a plain email address")
 
 
+def test_compose_attachment_rules():
+    from urllib.parse import unquote
+
+    outbox = TMP / "outbox"
+    (outbox / "sub").mkdir(parents=True)
+    (outbox / ".git").mkdir()
+    report, notes = outbox / "informe final.pdf", outbox / "sub" / "año, notas.txt"
+    for f in (report, notes, outbox / ".env", outbox / ".git" / "config", TMP / "elsewhere.txt"):
+        f.write_text("x", encoding="utf-8")
+    allowed, blocked = [str(outbox)], s.private_paths(PROFILE)
+
+    files = s.check_attachments([str(report), str(notes), str(report)], allowed, blocked)
+    assert files == [report.resolve(), notes.resolve()], files  # duplicates dropped, order kept
+    spec = s.build_compose_spec(["a@b.org"], [], [], "x", "", files)
+    fields = dict(f.split("=", 1) for f in spec.split(","))
+    urls = unquote(fields["attachment"]).split(",")  # what Thunderbird does with the field
+    assert urls == [p.as_uri() for p in files], urls  # the comma in "año, notas.txt" stays encoded
+    assert "attachment" not in s.build_compose_spec(["a@b.org"], [], [], "x", "")
+
+    raises(lambda: s.check_attachments([str(report)], [], blocked), "switched off")
+    raises(lambda: s.check_attachments(["informe final.pdf"], allowed, blocked), "must be absolute")
+    raises(lambda: s.check_attachments([str(outbox / "missing.pdf")], allowed, blocked), "not found")
+    raises(lambda: s.check_attachments([str(outbox / "sub")], allowed, blocked), "not a file")
+    raises(lambda: s.check_attachments([str(TMP / "elsewhere.txt")], allowed, blocked), "outside the folders")
+    raises(lambda: s.check_attachments([str(outbox / "sub" / ".." / ".." / "elsewhere.txt")], allowed, blocked),
+           "outside the folders")
+    raises(lambda: s.check_attachments([str(outbox / ".env")], allowed, blocked), "hidden")
+    raises(lambda: s.check_attachments([str(outbox / ".git" / "config")], allowed, blocked), "hidden")
+    # Allowing a parent folder does not open the mail store or the server's own files.
+    raises(lambda: s.check_attachments([str(INBOX)], [str(TMP)], blocked), "Thunderbird profile")
+    raises(lambda: s.check_attachments([os.environ["TB_CONFIG"]], [str(TMP)], blocked), "own files")
+    limit = s.MAX_ATTACHMENT
+    s.MAX_ATTACHMENT = 0
+    try:
+        raises(lambda: s.check_attachments([str(report)], allowed, blocked), "MB limit")
+    finally:
+        s.MAX_ATTACHMENT = limit
+    link = outbox / "link.txt"
+    try:
+        link.symlink_to(TMP / "elsewhere.txt")
+    except OSError:
+        pass  # creating links needs extra rights on Windows; the CI runners on Linux and macOS cover it
+    else:
+        raises(lambda: s.check_attachments([str(link)], allowed, blocked), "outside the folders")
+
+
+def test_compose_tool_with_attachments():
+    from urllib.parse import unquote
+
+    report = TMP / "outbox" / "informe final.pdf"
+    launched: list[list[str]] = []
+    real_popen, real_exe = s.subprocess.Popen, s.thunderbird_exe
+    s.subprocess.Popen = lambda args, **kw: launched.append(args)
+    s.thunderbird_exe = lambda cfg: Path("thunderbird")
+    try:
+        write_config()
+        fresh_index()
+        raises(lambda: s.compose(to="a@b.org", attachments=[str(report)]), "switched off")
+        write_config(dirs=f"['{(TMP / 'outbox').as_posix()}']")
+        fresh_index()
+        out = s.compose(to="a@b.org", subject="Datos", attachments=[str(report)])
+        assert "attaching informe final.pdf" in out and "Nothing has been sent" in out, out
+        assert len(launched) == 1 and launched[0][1] == "-compose"
+        fields = dict(f.split("=", 1) for f in launched[0][2].split(","))
+        assert unquote(fields["attachment"]) == report.resolve().as_uri()
+        raises(lambda: s.compose(to="a@b.org", attachments=[str(INBOX)]), "outside the folders")
+        assert len(launched) == 1, "a refused attachment must not open a window"
+    finally:
+        s.subprocess.Popen, s.thunderbird_exe = real_popen, real_exe
+        write_config()
+    log = (Path(os.environ["TB_DATA_DIR"]) / "audit.log").read_text(encoding="utf-8")
+    assert "informe final.pdf" in log and "window opened" in log
+
+
 def test_audit_log_has_no_mail_text():
     log = (Path(os.environ["TB_DATA_DIR"]) / "audit.log").read_text(encoding="utf-8")
     for phrase in ("Adjunto los ficheros", "Plazo abierto", "floración 12", "would you review", "Dormancy release"):
@@ -427,6 +503,7 @@ def test_init_and_bundled_example():
     cfg = s.load_config(target)
     assert cfg["exclude"]["folders"][:3] == ["trash", "spam", "junk"] and cfg["exclude"]["whole_thread"] is True
     assert cfg["profile"] == "" and cfg["thunderbird_exe"] == ""
+    assert cfg["attachment_dirs"] == [], "attachments must ship switched off"
     s.Exclusions(cfg["exclude"])  # every pattern in the bundled example compiles
 
 
@@ -460,6 +537,8 @@ MUTATING = [
     test_rule_change_rebuilds_index,
     test_query_sanitising,
     test_compose_arguments,
+    test_compose_attachment_rules,
+    test_compose_tool_with_attachments,
     test_audit_log_has_no_mail_text,
 ]
 PLATFORM = [

@@ -6,7 +6,8 @@ are copied into a local SQLite full-text index in the user's data folder (keep t
 cloud-synced locations). A configurable exclusion list keeps folders, senders, subjects, body
 patterns and whole conversations out of that index, so excluded mail never reaches the model. The
 one action with an effect outside the server is compose(), which opens a pre-filled Thunderbird
-compose window that the user reviews and sends by hand.
+compose window that the user reviews and sends by hand; it can attach local files, but only from
+folders the user listed in the configuration.
 
 Configuration, from the environment (both optional):
   TB_CONFIG    path to config.toml (exclusion rules, profile, Thunderbird executable);
@@ -116,6 +117,8 @@ def load_config(path: Path = CONFIG_PATH) -> dict:
     return {
         "profile": raw.get("profile", ""),
         "thunderbird_exe": raw.get("thunderbird_exe", ""),
+        # Not part of the index fingerprint: changing it never rebuilds the index.
+        "attachment_dirs": [str(d) for d in raw.get("compose", {}).get("attachment_dirs", [])],
         "exclude": {
             "folders": [str(f).strip("/").lower() for f in ex.get("folders", [])],
             "senders": [str(s).strip().lower() for s in ex.get("senders", [])],
@@ -1053,6 +1056,13 @@ def attachment_text(data: bytes, filename: str, ctype: str, charset: str | None)
 # breaks in the text cannot end a field early or inject another one. The message=<file> option was
 # tried first and Thunderbird 160 ignores it (window opened with an empty body, 2026-11-18).
 # Nothing is ever sent from here: the user reads the window and presses Send.
+#
+# Attachments go in the same command line as file URLs. A file is accepted only from a folder the
+# user listed in [compose] attachment_dirs (none by default), after resolving links, and never if
+# it is hidden below that folder (.ssh, .git, .env...), part of the Thunderbird profile (the mbox
+# files hold the mail the privacy filter keeps out) or one of this server's own files (the index,
+# and config.toml, whose rules say what the user considers confidential). The point is that an
+# email with instructions aimed at the model cannot get it to attach an arbitrary private file.
 
 _ADDR = re.compile(r"^[^@\s,;'\"<>()]+@[^@\s,;'\"<>()]+\.[^@\s,;'\"<>()]+$")
 MAX_COMMAND = 30_000  # Windows caps a command line at 32,767 characters; the same limit is kept everywhere
@@ -1066,7 +1076,51 @@ def split_addresses(value: str) -> list[str]:
     return out
 
 
-def build_compose_spec(to: list[str], cc: list[str], bcc: list[str], subject: str, body: str) -> str:
+def private_paths(profile: Path) -> list[Path]:
+    """Places compose() never attaches from: the mail store and this server's config, index and log."""
+    return [profile, *profile_roots(), DATA_DIR, CONFIG_PATH, _CONFIG_DIR]
+
+
+def check_attachments(paths: list[str], allowed_dirs: list[str], blocked: list[Path]) -> list[Path]:
+    """Resolved files compose() may attach; refuses anything the rules above keep out."""
+    if not paths:
+        return []
+    if not allowed_dirs:
+        raise ToolError(
+            "attachments are switched off: the user has to list the folders files may be attached "
+            "from in [compose] attachment_dirs of config.toml"
+        )
+    allowed = [Path(os.path.expandvars(d)).expanduser().resolve() for d in allowed_dirs]
+    blocked = [b.resolve() for b in blocked]
+    out: list[Path] = []
+    for raw in paths:
+        p = Path(raw).expanduser()
+        if not p.is_absolute():
+            raise ToolError(f"attachment paths must be absolute, got {raw!r}")
+        try:
+            real = p.resolve(strict=True)  # follows links, so a link cannot point out of an allowed folder
+        except (OSError, RuntimeError):
+            raise ToolError(f"attachment not found: {raw}") from None
+        if not real.is_file():
+            raise ToolError(f"attachment is not a file: {raw}")
+        base = next((a for a in allowed if real.is_relative_to(a)), None)
+        if base is None:
+            raise ToolError(f"{raw} is outside the folders listed in [compose] attachment_dirs")
+        if any(part.startswith(".") for part in real.relative_to(base).parts):
+            raise ToolError(f"{raw} is hidden or inside a hidden folder; such files are never attached")
+        if any(real.is_relative_to(b) for b in blocked):
+            raise ToolError(f"{raw} is part of the Thunderbird profile or of this server's own files; it is never attached")
+        size = real.stat().st_size
+        if size > MAX_ATTACHMENT:
+            raise ToolError(f"{raw} is {size / 1024**2:.0f} MB, above the {MAX_ATTACHMENT // 1024**2} MB limit")
+        if real not in out:
+            out.append(real)
+    return out
+
+
+def build_compose_spec(
+    to: list[str], cc: list[str], bcc: list[str], subject: str, body: str, attachments: list[Path] | None = None
+) -> str:
     def enc(value: str) -> str:
         return quote(value, safe="@")
 
@@ -1079,11 +1133,15 @@ def build_compose_spec(to: list[str], cc: list[str], bcc: list[str], subject: st
         fields.append(f"subject={enc(re.sub(r'[\r\n]+', ' ', subject))}")
     if body:
         fields.append(f"body={enc(body.replace('\r\n', '\n'))}")
+    if attachments:
+        # Thunderbird splits this field on commas after decoding it; a file URL writes any comma
+        # in a file name as %2C, so names with commas survive.
+        fields.append(f"attachment={enc(','.join(p.as_uri() for p in attachments))}")
     spec = ",".join(fields)
     if len(spec) > MAX_COMMAND:
         raise ToolError(
             f"the message is too long to pass to Thunderbird ({len(spec)} encoded characters, limit {MAX_COMMAND}); "
-            "shorten the body or open the window with a short body and paste the rest"
+            "shorten the body or attach fewer files, or open the window with a short body and paste the rest"
         )
     return spec
 
@@ -1171,7 +1229,8 @@ server = MCPServer(
         "Some mail is excluded on purpose by the user's privacy filter; do not try to reach it "
         "another way. Only mail Thunderbird has already downloaded is visible. compose() opens a "
         "pre-filled Thunderbird window and never sends; "
-        "say so to the user and remind them to review it."
+        "say so to the user and remind them to review it. It attaches files only from folders the "
+        "user allowed in config.toml."
     ),
 )
 READ = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
@@ -1467,10 +1526,15 @@ def read_attachment(id: str, attachment: str = "1", max_chars: int = 30000) -> s
 
 @server.tool(annotations=COMPOSE)
 @tool_errors
-def compose(to: str, subject: str = "", body: str = "", cc: str = "", bcc: str = "") -> str:
+def compose(
+    to: str, subject: str = "", body: str = "", cc: str = "", bcc: str = "", attachments: list[str] | None = None
+) -> str:
     """Open a pre-filled Thunderbird compose window. Nothing is sent: the user reviews and sends.
 
     to, cc, bcc: bare addresses separated by commas. body: plain text; line breaks are kept.
+    attachments: absolute paths of local files to attach. Only files inside the folders the user
+    listed in [compose] attachment_dirs of config.toml are accepted (none unless the user set it);
+    never copy or move a file into those folders to get around this.
     The whole message must fit in one command line (roughly 5,000-10,000 characters of text).
     A reply written this way is not linked to the original thread (start the subject with "Re:").
     """
@@ -1479,8 +1543,9 @@ def compose(to: str, subject: str = "", body: str = "", cc: str = "", bcc: str =
     if not recipients:
         raise ToolError("at least one recipient is needed in 'to'")
     cc_list, bcc_list = split_addresses(cc), split_addresses(bcc)
+    files = check_attachments(attachments or [], idx.cfg["attachment_dirs"], private_paths(idx.profile))
     exe = thunderbird_exe(idx.cfg)
-    spec = build_compose_spec(recipients, cc_list, bcc_list, subject, body)
+    spec = build_compose_spec(recipients, cc_list, bcc_list, subject, body, files)
     # Thunderbird must outlive this server and share neither its console nor its process group.
     if sys.platform == "win32":
         detach = {"creationflags": 0x00000008 | 0x00000200}  # DETACHED_PROCESS | NEW_PROCESS_GROUP
@@ -1492,11 +1557,16 @@ def compose(to: str, subject: str = "", body: str = "", cc: str = "", bcc: str =
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         close_fds=True, **detach,
     )
-    audit("compose", json.dumps({"to": recipients, "cc": cc_list, "bcc": bcc_list, "subject": subject}, ensure_ascii=False), "window opened")
+    audit("compose", json.dumps({"to": recipients, "cc": cc_list, "bcc": bcc_list, "subject": subject,
+                                 "attachments": [str(p) for p in files]}, ensure_ascii=False), "window opened")
     return (
         f"Opened a Thunderbird compose window to {', '.join(recipients)}"
         + (f" (cc {', '.join(cc_list)})" if cc_list else "")
-        + f", subject {subject!r}. Nothing has been sent: the user reviews the text and presses Send."
+        + f", subject {subject!r}"
+        + (f", attaching {', '.join(p.name for p in files)}" if files else "")
+        + ". Nothing has been sent: the user reviews the text"
+        + (" and the attachments" if files else "")
+        + " and presses Send."
     )
 
 

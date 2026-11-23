@@ -41,3 +41,12 @@ body_regex = []
 # Exclude every message of a conversation in which any message is excluded (replies quote the
 # original, and a subject rule rarely matches every reply).
 whole_thread = true
+
+[compose]
+# Folders compose() may attach files from, subfolders included. Empty: attachments are refused.
+# Even inside these folders, hidden files and folders (names starting with a dot), the Thunderbird
+# profile and this server's own files are never attached. Keep the list short: whatever is in
+# these folders could end up attached to a message an email asked the assistant to write.
+# Use single quotes for Windows paths.
+# Example: attachment_dirs = ['C:\Users\me\Documents\To send', '~/Documents/to-send']
+attachment_dirs = []

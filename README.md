@@ -17,7 +17,7 @@ It was written for Claude Code and should work with any MCP client that can star
 | `get_message` | Headers, flags, tags, attachment list and body text of one message | reads |
 | `get_thread` | Every readable message of a conversation, oldest first | reads |
 | `read_attachment` | Text of a PDF, DOCX, XLSX or plain-text attachment | reads |
-| `compose` | Opens a pre-filled Thunderbird compose window. Nothing is sent: you review it and press Send | opens a window |
+| `compose` | Opens a pre-filled Thunderbird compose window, with attachments from folders you allow. Nothing is sent: you review it and press Send | opens a window |
 
 There is no tool to send, delete, move, flag or mark mail as read, so a malicious email cannot talk the assistant into doing any of that.
 
@@ -100,13 +100,14 @@ Then ask things like "what arrived from the university this week?", "summarise t
 
 ## Configuration
 
-`config.toml` has two general settings and the filter:
+`config.toml` has two general settings, the filter and the attachment folders:
 
 | Setting | Meaning | When empty |
 | --- | --- | --- |
 | `profile` | Thunderbird profile folder | The profile named in Thunderbird's `profiles.ini` |
 | `thunderbird_exe` | Thunderbird executable, used only by `compose` | Looked up on `PATH` and in the standard install folders |
 | `[exclude]` | The privacy filter | Ships excluding the Trash, Spam and Junk folders |
+| `[compose] attachment_dirs` | Folders `compose` may attach files from (see [Attachments](#attachments)) | Attachments are refused |
 
 Where things live:
 
@@ -142,6 +143,26 @@ Two practical notes. Write regular expressions between single quotes: inside dou
 
 Folder names differ between providers and languages ("Deleted Items", "Papelera", "[Gmail]/Trash"). The report lists the names your accounts use.
 
+## Attachments
+
+`compose` can attach local files to the window it opens. This is off until you name the folders it may take files from:
+
+```toml
+[compose]
+attachment_dirs = ['C:\Users\me\Documents\To send']
+```
+
+The assistant then passes absolute paths in `attachments`, and the server checks each one before anything opens:
+
+- The file has to be inside one of those folders, subfolders included. Links are resolved first, so a link cannot point outside.
+- Hidden files and folders below them (names starting with a dot, such as `.git` or `.env`) are refused.
+- The Thunderbird profile and the server's own files (`config.toml`, the index and the log) are refused even if a listed folder contains them. The profile holds the mail your filter keeps out, and the config says what you consider confidential.
+- Files over 50 MB are refused.
+
+If any file fails a check, no window opens. Changing `attachment_dirs` takes effect when the server restarts and does not rebuild the index.
+
+Keep the list to folders whose contents you would not mind attaching by mistake. An email can contain instructions aimed at the assistant, and the server cannot stop the assistant from first copying a file into an allowed folder with its other tools. You still see every attachment in the window before pressing Send.
+
 ## Security model
 
 | Risk | What covers it |
@@ -150,6 +171,7 @@ Folder names differ between providers and languages ("Deleted Items", "Papelera"
 | The assistant goes around the filter by reading the profile or the index as plain files | Not something this server can prevent: deny your client's file tools access to both folders (example below) |
 | An email carries instructions aimed at the assistant (prompt injection) | No tool can send, delete, move or forward. Everything returned from an email is labelled as third-party content. `compose` only opens a window and you press Send |
 | `compose` smuggles extra fields through quotes or commas in the text | Every field is percent-encoded and addresses are validated; a test tries to inject a recipient through the body |
+| An email gets the assistant to attach a private file | Attachments are off by default and limited to the folders you list; hidden files, the Thunderbird profile and the server's own files are always refused; you see the attachments before sending |
 | The server damages the Thunderbird profile | Files are opened read-only; a test checks that no profile file changes |
 | No trace of what the assistant looked at | `audit.log` next to the index records time, tool, query and returned ids, never mail text |
 
@@ -198,7 +220,7 @@ The index is a single SQLite file with an FTS5 full-text table. It stores header
 
 ## Status
 
-Version 0.1.0. The test suite (18 cases on a synthetic profile, no real mail involved) runs on Windows, Linux and macOS with Python 3.12 and 3.13.
+Version 0.2.0. The test suite (20 cases on a synthetic profile, no real mail involved) runs on Windows, Linux and macOS with Python 3.12 and 3.13.
 
 With a real mailbox it has been used on Windows 10 with Thunderbird 160 and an IMAP account, where the first run indexes a couple of thousand messages in well under a minute and later calls take under a second. On Linux and macOS the profile and executable locations are implemented and unit-tested but have not been tried against a real installation yet. If you run it there, an issue saying whether it worked is welcome.
 
