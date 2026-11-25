@@ -17,7 +17,9 @@ It was written for Claude Code and should work with any MCP client that can star
 | `get_message` | Headers, flags, tags, attachment list and body text of one message | reads |
 | `get_thread` | Every readable message of a conversation, oldest first | reads |
 | `read_attachment` | Text of a PDF, DOCX, XLSX or plain-text attachment | reads |
-| `compose` | Opens a pre-filled Thunderbird compose window, with attachments from folders you allow. Nothing is sent: you review it and press Send | opens a window |
+| `compose` | Opens a pre-filled Thunderbird compose window for a new message, with attachments from folders you allow. Nothing is sent: you review it and press Send | opens a window |
+| `reply` | Opens Thunderbird's own reply window for a message: same conversation, original quoted, everyone in copy by default. The reply text goes to your clipboard for you to paste (see [Replies and forwards](#replies-and-forwards)) | opens a window, sets the clipboard |
+| `forward` | Opens Thunderbird's forward window with the original attached as an `.eml` file, its attachments inside, plus your text and any files from allowed folders | opens a window |
 
 There is no tool to send, delete, move, flag or mark mail as read, so a malicious email cannot talk the assistant into doing any of that.
 
@@ -44,12 +46,12 @@ The price of that design: only mail with an offline copy on this computer is vis
 1. Install the command, pinned to a release:
 
    ```
-   uv tool install git+https://github.com/DanielGP121/thunderbird-local-mcp@v0.3.0
+   uv tool install git+https://github.com/DanielGP121/thunderbird-local-mcp@v0.4.0
    ```
 
-   With pipx: `pipx install git+https://github.com/DanielGP121/thunderbird-local-mcp@v0.3.0`
+   With pipx: `pipx install git+https://github.com/DanielGP121/thunderbird-local-mcp@v0.4.0`
 
-   Keep the `@v0.3.0`. Without it you install whatever the main branch holds that day, and an update reaches you only when you choose to install it. The [releases page](https://github.com/DanielGP121/thunderbird-local-mcp/releases) lists the versions.
+   Keep the `@v0.4.0`. Without it you install whatever the main branch holds that day, and an update reaches you only when you choose to install it. The [releases page](https://github.com/DanielGP121/thunderbird-local-mcp/releases) lists the versions.
 
 2. Create the configuration file. The command prints where it put it:
 
@@ -92,7 +94,7 @@ The price of that design: only mail with an offline copy on this computer is vis
      "mcpServers": {
        "thunderbird": {
          "command": "uvx",
-         "args": ["--from", "git+https://github.com/DanielGP121/thunderbird-local-mcp@v0.3.0", "thunderbird-local-mcp"]
+         "args": ["--from", "git+https://github.com/DanielGP121/thunderbird-local-mcp@v0.4.0", "thunderbird-local-mcp"]
        }
      }
    }
@@ -167,26 +169,40 @@ If any file fails a check, no window opens. Changing `attachment_dirs` takes eff
 
 Keep the list to folders whose contents you would not mind attaching by mistake. An email can contain instructions aimed at the assistant, and the server cannot stop the assistant from first copying a file into an allowed folder with its other tools. You still see every attachment in the window before pressing Send.
 
+`reply` and `forward` accept the same `attachments` with the same checks.
+
+## Replies and forwards
+
+`reply` and `forward` take the id of a message from `search` and ask Thunderbird to open the same window its Reply, Reply All and Forward buttons open. Thunderbird then sets the headers that keep the conversation together, quotes the original, picks the recipients and the sending identity, and marks the original as replied once you send.
+
+Two things work differently from what you might expect, because of how Thunderbird handles these windows when they are opened from outside (checked on Thunderbird 160):
+
+- **The reply text arrives on the clipboard.** Thunderbird fills a reply with its quote and drops any text passed to it. So `reply` copies the assistant's text to the clipboard, and you paste it above the quote with Ctrl+V (Cmd+V on a Mac). This replaces whatever the clipboard held. On Linux it needs `wl-copy`, `xclip` or `xsel`; without them the assistant gives you the text instead.
+- **Forwards carry the original as an attachment.** An inline forward opened this way comes out empty, so `forward` attaches the original message as an `.eml` file, which keeps its own attachments. Your text goes in the body.
+
+By default `reply` answers everyone (sender, To and Cc, minus your own addresses, which Thunderbird removes); ask for "sender only" to reply just to the sender. Neither tool works on a message the privacy filter excludes. A message that has only a provisional id (`INBOX#o...`) has to wait until Thunderbird saves its folder summary, which happens within moments of opening the folder.
+
 ## Security model
 
 | Risk | What covers it |
 | --- | --- |
 | The assistant reads mail it should not | The filter runs before the index, and excluded mail is not stored. It also looks inside forwarded messages and at attachment names, and checks attachment text when it is read |
 | The assistant goes around the filter by reading the profile or the index as plain files | Not something this server can prevent: deny your client's file tools access to both folders (example below) |
-| An email carries instructions aimed at the assistant (prompt injection) | No tool can send, delete, move or forward. Headers, bodies and attachment text come inside markers with a random tag that changes on every call, so an email cannot fake the end of its own block. Control characters and bidirectional overrides are removed. `compose` only opens a window and you press Send |
-| `compose` smuggles extra fields through quotes or commas in the text | Every field is percent-encoded and addresses are validated; a test tries to inject a recipient through the body |
+| An email carries instructions aimed at the assistant (prompt injection) | No tool can send, delete or move mail. Headers, bodies and attachment text come inside markers with a random tag that changes on every call, so an email cannot fake the end of its own block. Control characters and bidirectional overrides are removed. `compose`, `reply` and `forward` only open a window and you press Send |
+| `compose`, `reply` or `forward` smuggle extra fields through quotes or commas in the text | Every field is percent-encoded and addresses are validated; a test tries to inject a recipient through the body |
+| An email gets the assistant to reply to or forward a message you keep out | `reply` and `forward` refuse messages the privacy filter excludes, like the reading tools |
 | A program called `thunderbird` planted in a folder runs instead of Thunderbird | `compose` takes the executable from `thunderbird_exe`, from absolute `PATH` entries or from the standard install folders, never from the current folder; on Windows only a real `thunderbird.exe` |
 | An email gets the assistant to attach a private file | Attachments are off by default and limited to the folders you list; hidden files, the Thunderbird profile and the server's own files are always refused; you see the attachments before sending |
 | Another account on the same computer reads the index | On Linux and macOS the data folder is `700`; on Windows it sits in your own profile |
 | A malformed attachment exhausts memory | Office files that would inflate past 200 MB and PDF pages beyond 2,000 are not read; very long HTML is cut before parsing |
 | The server damages the Thunderbird profile | Files are opened read-only; a test checks that no profile file changes |
-| No trace of what the assistant looked at | `audit.log` next to the index records time, tool, query and returned ids, never mail text |
+| No trace of what the assistant looked at | `audit.log` next to the index records time, tool, query and returned ids, never mail text nor the text of a message being written |
 
 Keep in mind that whatever the assistant reads through these tools is sent to your model provider like the rest of the conversation. The filter is the place to keep out what must not leave your computer.
 
 Be careful with what else your assistant may do without asking. If the reading tools run freely and so does a tool that reaches the internet (a web fetch, a browser, a shell), an email with hidden instructions could get the assistant to read another message and send it out, with no step for you to approve. Keep network tools on "ask", or the reading tools on "ask", but not both on "allow". And keep Python up to date: the server parses mail written by strangers with the standard library's email, HTML and zip modules, which receive security fixes in each patch release.
 
-Suggested permission rules for Claude Code (`~/.claude/settings.json`). They let the five reading tools run freely, ask before every compose window, and stop Claude's own file tools from opening the profile or the index. Adjust the paths to your system; the ones shown are for Windows:
+Suggested permission rules for Claude Code (`~/.claude/settings.json`). They let the five reading tools run freely, ask before every compose, reply or forward window, and stop Claude's own file tools from opening the profile or the index. Adjust the paths to your system; the ones shown are for Windows:
 
 ```json
 {
@@ -198,7 +214,7 @@ Suggested permission rules for Claude Code (`~/.claude/settings.json`). They let
       "mcp__thunderbird__get_thread",
       "mcp__thunderbird__read_attachment"
     ],
-    "ask": ["mcp__thunderbird__compose"],
+    "ask": ["mcp__thunderbird__compose", "mcp__thunderbird__reply", "mcp__thunderbird__forward"],
     "deny": [
       "Read(//c/Users/YOUR_USER/AppData/Roaming/Thunderbird/**)",
       "Read(//c/Users/YOUR_USER/AppData/Local/thunderbird-local-mcp/**)"
@@ -223,13 +239,14 @@ The index is a single SQLite file with an FTS5 full-text table. It stores header
 
 - Only mail Thunderbird has downloaded is visible. If a recent message is missing, open Thunderbird and let it sync.
 - Maildir accounts are not supported.
-- `compose` passes the whole message on the command line, so it is limited to roughly 5,000 to 10,000 characters of text. Replies written this way are not linked to the original thread.
-- `compose` needs to find the Thunderbird executable. With Flatpak or an unusual install location, set `thunderbird_exe` in `config.toml`.
+- `compose` passes the whole message on the command line, so it is limited to roughly 5,000 to 10,000 characters of text. It always starts a new conversation; use `reply` to answer.
+- `compose`, `reply` and `forward` need to find the Thunderbird executable. With Flatpak or an unusual install location, set `thunderbird_exe` in `config.toml`.
+- `reply` and `forward` build Thunderbird's internal address of the message from the account settings in `prefs.js` and the folder's name on disk. Folders whose name Thunderbird stores differently on disk (some non-ASCII IMAP names) may not be found; tested with INBOX and with folder names that contain spaces.
 - Attachment text is extracted from PDF, DOCX, XLSX and plain-text formats only. Scanned PDFs yield no text (there is no OCR).
 
 ## Status
 
-Version 0.3.0. The test suite (27 cases on a synthetic profile, no real mail involved) runs on Windows, Linux and macOS with Python 3.12 and 3.13.
+Version 0.4.0. The test suite (29 cases on a synthetic profile, no real mail involved) runs on Windows, Linux and macOS with Python 3.12 and 3.13.
 
 To report a security problem, see [SECURITY.md](SECURITY.md); please do not open a public issue for it.
 

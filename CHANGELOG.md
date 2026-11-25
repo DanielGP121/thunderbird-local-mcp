@@ -2,6 +2,14 @@
 
 All notable changes to this project are listed here. Versions follow [Semantic Versioning](https://semver.org/).
 
+## 0.4.0 (2026-11-25)
+
+- New `reply` tool: opens Thunderbird's own reply window for a message id, so the reply stays in the same conversation, quotes the original and is marked as replied once sent. Reply-all by default, sender only on request, attachments from allowed folders. Thunderbird drops text passed to a reply window, so the reply text is copied to the clipboard for the user to paste.
+- New `forward` tool: opens Thunderbird's forward window with the original attached as an `.eml` file (its attachments inside), the user's text in the body, and extra files from allowed folders.
+- Both refuse messages excluded by the privacy filter and messages that only have a provisional id.
+- A refused call no longer writes the text of the message being written to `audit.log`; only its length is logged.
+- Add `mcp__thunderbird__reply` and `mcp__thunderbird__forward` to your client's "ask" rules, next to `compose`.
+
 ## 0.3.0 (2026-11-25)
 
 Security release, from a review of 0.2.0. Upgrade recommended. The index is rebuilt once on the first call, because the filter now excludes more.

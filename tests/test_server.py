@@ -446,6 +446,93 @@ def test_compose_tool_with_attachments():
     assert "informe final.pdf" in log and "window opened" in log
 
 
+# prefs.js as Thunderbird writes it: JS string escapes, a relative and an absolute account folder,
+# a server without a folder, and preferences outside mail.server.* that must be skipped.
+PREFS = r'''// Mozilla User Preferences
+user_pref("browser.cache.disk.capacity", 1048576);
+user_pref("mail.identity.id1.useremail", "alex@example.org");
+user_pref("mail.server.server1.directory-rel", "[ProfD]ImapMail/imap.example.org");
+user_pref("mail.server.server1.hostname", "imap.example.org");
+user_pref("mail.server.server1.type", "imap");
+user_pref("mail.server.server1.userName", "alex@example.org");
+user_pref("mail.server.server2.directory", "C:\\Users\\alex\\Profiles\\test.default\\Mail\\Local Folders");
+user_pref("mail.server.server2.hostname", "Local Folders");
+user_pref("mail.server.server2.type", "none");
+user_pref("mail.server.server2.userName", "nobody");
+user_pref("mail.server.server3.hostname", "pop.example.org");
+user_pref("mail.server.server3.name", "Quote \"inside\" name");
+'''
+
+
+def test_accounts_and_message_uris():
+    folder = TMP / "prefs_case"
+    folder.mkdir()
+    (folder / "prefs.js").write_text(PREFS, encoding="utf-8")
+    prefs = s.read_mail_prefs(folder)
+    assert "browser.cache.disk.capacity" not in prefs and "mail.identity.id1.useremail" not in prefs
+    assert prefs["mail.server.server3.name"] == 'Quote "inside" name'
+    accounts = s.mail_accounts(folder, prefs)
+    assert set(accounts) == {(True, "imap.example.org"), (False, "Local Folders")}, accounts
+    assert s.message_uri(accounts[(True, "imap.example.org")], "INBOX", "1") == \
+        "imap-message://alex%40example.org@imap.example.org/INBOX#1"
+    assert s.message_uri(accounts[(False, "Local Folders")], "Saved/Año 2026", "42") == \
+        "mailbox-message://nobody@Local%20Folders/Saved/A%C3%B1o%202026#42"
+    assert s.read_mail_prefs(TMP / "no_such_profile") == {}
+    row = {"folder": "INBOX", "msg_key": "o1234", "mbox": str(INBOX)}
+    raises(lambda: s.original_message_uri(s.get_index(), row), "provisional")
+
+
+def test_reply_and_forward_tools():
+    from urllib.parse import unquote
+
+    report = TMP / "outbox" / "informe final.pdf"
+    launched: list[list[str]] = []
+    clipboard: list[str] = []
+    real = s.subprocess.Popen, s.thunderbird_exe, s.copy_to_clipboard
+    s.subprocess.Popen = lambda args, **kw: launched.append(args)
+    s.thunderbird_exe = lambda cfg: Path("thunderbird")
+    s.copy_to_clipboard = lambda text: clipboard.append(text) or True
+    (PROFILE / "prefs.js").write_text(PREFS, encoding="utf-8")
+
+    def fields() -> dict[str, str]:
+        return {k: unquote(v) for k, v in (f.split("=", 1) for f in launched[-1][2].split(","))}
+
+    try:
+        write_config(dirs=f"['{(TMP / 'outbox').as_posix()}']")
+        s._index.db.close()
+        s._index = None  # reply() as the first call of a session must refresh the index itself
+        text = "Gracias, Ana.\nLo reviso esta semana."
+        out = s.reply(id="INBOX#1", body=text)
+        f = fields()
+        assert f["type"] == "2" and f["originalMsgURI"] == "imap-message://alex%40example.org@imap.example.org/INBOX#1", f
+        assert "body" not in f and clipboard == [text], "reply text must go to the clipboard, not the command line"
+        assert "reply-all" in out and "on the clipboard" in out and "Nothing has been sent" in out, out
+        s.reply(id="INBOX#1", reply_all=False, attachments=[str(report)])
+        f = fields()
+        assert f["type"] == "1" and f["attachment"] == report.resolve().as_uri() and len(clipboard) == 1
+        s.copy_to_clipboard = lambda text: False
+        assert "could not be put on the clipboard" in s.reply(id="INBOX#2", body="Recibido.")
+        out = s.forward(id="INBOX#3", to="luis@example.org", body="Te reenvío los ficheros.")
+        f = fields()
+        assert f["type"] == "3" and f["to"] == "luis@example.org" and f["body"] == "Te reenvío los ficheros.", f
+        assert f["originalMsgURI"].endswith("/INBOX#3") and "original attached" in out
+        assert "no recipient yet" in s.forward(id="INBOX#3")
+        opened = len(launched)
+        raises(lambda: s.reply(id="INBOX#4", body="Borrador rechazado"), "privacy filter")
+        raises(lambda: s.forward(id="INBOX#5", to="luis@example.org"), "privacy filter")
+        raises(lambda: s.forward(id="INBOX#3", to="luis@example.org',body='x"), "not a plain email address")
+        raises(lambda: s.reply(id="INBOX#1", attachments=[str(INBOX)]), "outside the folders")
+        assert len(launched) == opened, "a refused reply or forward must not open a window"
+    finally:
+        s.subprocess.Popen, s.thunderbird_exe, s.copy_to_clipboard = real
+        (PROFILE / "prefs.js").unlink(missing_ok=True)
+        write_config()
+    log = (Path(os.environ["TB_DATA_DIR"]) / "audit.log").read_text(encoding="utf-8")
+    assert "\treply\twindow opened" in log and "\tforward\twindow opened" in log
+    for phrase in ("Gracias, Ana", "Te reenvío", "Borrador rechazado"):
+        assert phrase not in log, f"text being written reached audit.log: {phrase!r}"
+
+
 def test_audit_log_has_no_mail_text():
     log = (Path(os.environ["TB_DATA_DIR"]) / "audit.log").read_text(encoding="utf-8")
     for phrase in ("Adjunto los ficheros", "Plazo abierto", "floración 12", "would you review", "Dormancy release"):
@@ -697,6 +784,8 @@ MUTATING = [
     test_compose_arguments,
     test_compose_attachment_rules,
     test_compose_tool_with_attachments,
+    test_accounts_and_message_uris,
+    test_reply_and_forward_tools,
     test_audit_log_has_no_mail_text,
 ]
 REVIEW = [
