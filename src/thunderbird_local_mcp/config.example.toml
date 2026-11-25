@@ -22,19 +22,21 @@ thunderbird_exe = ""
 # providers and languages differ ("Deleted Items", "Papelera", "Junk E-mail"...).
 folders = ["Trash", "Spam", "Junk"]
 
-# Senders: a full address, or "@domain" (which also covers its subdomains).
+# Senders: a full address, or "@domain" (which also covers its subdomains). Checked on the message
+# and on any message forwarded inside it as an attachment.
 # Example: senders = ["@bank.example", "payroll@company.example"]
 senders = []
 
-# Python regular expressions matched against the subject, case-insensitive. Write them between
-# single quotes: TOML reads backslashes inside double quotes as escapes ("\b" becomes a backspace
-# and the rule silently stops matching).
+# Python regular expressions matched against the subject, case-insensitive, of the message and of
+# any message forwarded inside it. Write them between single quotes: TOML reads backslashes inside
+# double quotes as escapes ("\b" becomes a backspace and the rule silently stops matching).
 # Example: subject_regex = ['payslip', 'invitation to review', 'medical (report|results)']
 subject_regex = []
 
-# Same, matched against the whole body text. Use sparingly: a pattern here can match anywhere.
-# Body rules catch what subject rules miss, such as confidential mail sent under an unrelated
-# subject.
+# Same, matched against every text part of the message (forwarded ones included) and against
+# attachment names; when an attachment is read, also against its text. Use sparingly: a pattern
+# here can match anywhere. Body rules catch what subject rules miss, such as confidential mail
+# sent under an unrelated subject.
 # Example: body_regex = ['confidential.{0,200}manuscript']
 body_regex = []
 

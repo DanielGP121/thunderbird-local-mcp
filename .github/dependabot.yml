@@ -1,0 +1,17 @@
+# Weekly update proposals for the Python dependencies and the pinned GitHub Actions. A release
+# must be a week old before it is proposed, so a hijacked version is usually pulled before it
+# arrives. Security alerts and security updates are switched on separately, in the settings.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7

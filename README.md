@@ -41,13 +41,15 @@ The price of that design: only mail with an offline copy on this computer is vis
 
 ## Quick start
 
-1. Install the command:
+1. Install the command, pinned to a release:
 
    ```
-   uv tool install git+https://github.com/DanielGP121/thunderbird-local-mcp
+   uv tool install git+https://github.com/DanielGP121/thunderbird-local-mcp@v0.3.0
    ```
 
-   With pipx: `pipx install git+https://github.com/DanielGP121/thunderbird-local-mcp`
+   With pipx: `pipx install git+https://github.com/DanielGP121/thunderbird-local-mcp@v0.3.0`
+
+   Keep the `@v0.3.0`. Without it you install whatever the main branch holds that day, and an update reaches you only when you choose to install it. The [releases page](https://github.com/DanielGP121/thunderbird-local-mcp/releases) lists the versions.
 
 2. Create the configuration file. The command prints where it put it:
 
@@ -83,14 +85,14 @@ The price of that design: only mail with an offline copy on this computer is vis
    }
    ```
 
-   If you prefer not to install anything, `uvx` can run it straight from the repository. Use it as the command, with these arguments:
+   If you prefer not to install anything, `uvx` can run it straight from the repository. Use it as the command, with these arguments, and keep the release tag in the URL: without it, every start of your MCP client would fetch and run the latest code from the main branch.
 
    ```json
    {
      "mcpServers": {
        "thunderbird": {
          "command": "uvx",
-         "args": ["--from", "git+https://github.com/DanielGP121/thunderbird-local-mcp", "thunderbird-local-mcp"]
+         "args": ["--from", "git+https://github.com/DanielGP121/thunderbird-local-mcp@v0.3.0", "thunderbird-local-mcp"]
        }
      }
    }
@@ -118,7 +120,7 @@ Where things live:
 
 On Linux `XDG_CONFIG_HOME` and `XDG_DATA_HOME` are honoured. Two environment variables override the defaults on any system: `TB_CONFIG` (path to the config file) and `TB_DATA_DIR` (folder for the index and the log).
 
-The index contains the text of your mail. Keep its folder out of anything that syncs to the cloud.
+The index contains the text of your mail. Keep its folder out of anything that syncs to the cloud. On Linux and macOS the server makes the data folder readable by your account only (`700`), and the config file it creates with `--init` too (`600`).
 
 ## Privacy filter
 
@@ -127,19 +129,21 @@ The `[exclude]` section of `config.toml` has five kinds of rule:
 | Rule | What it excludes | Example |
 | --- | --- | --- |
 | `folders` | Folders that are never opened, with their subfolders | `["Trash", "Spam", "Junk"]` |
-| `senders` | Full addresses, or `@domain` including its subdomains | `["@bank.example"]` |
-| `subject_regex` | Regular expressions on the subject, case-insensitive | `['payslip', 'invitation to review']` |
-| `body_regex` | Regular expressions on the body text | `['confidential.{0,200}manuscript']` |
+| `senders` | Full addresses, or `@domain` including its subdomains. Also checked on messages forwarded as attachments | `["@bank.example"]` |
+| `subject_regex` | Regular expressions on the subject, case-insensitive. Also checked on messages forwarded as attachments | `['payslip', 'invitation to review']` |
+| `body_regex` | Regular expressions on every text part of the message (forwarded ones included) and on attachment names. When an attachment is read, also on its text | `['confidential.{0,200}manuscript']` |
 | `whole_thread` | If one message is excluded, so is its whole conversation | `true` |
 
 How it behaves:
 
 - The filter runs before indexing. An excluded message keeps only what is needed to recognise it again (folder, position and message ids). Its sender, subject, text and attachments are never stored.
-- `get_message`, `get_thread` and `read_attachment` refuse an excluded message even when asked for it by id.
+- A message that carries an excluded one inside it (a colleague forwarding it as an attachment) is excluded as a whole.
+- `get_message`, `get_thread` and `read_attachment` refuse an excluded message even when asked for it by id. `read_attachment` reads the message again from the mailbox, checks it is the one that was indexed and runs the filter on it once more before extracting anything. If the text it extracts matches a body rule, it is not shown.
+- `list_folders` tells the assistant how many folders are excluded, never their names: a folder name can say what it holds.
 - Changing any rule rebuilds the whole index on the next call, because the text of what used to be excluded was never kept.
 - `thunderbird-local-mcp --report` shows how many messages each rule removes, per folder and per rule, without printing any mail text. Use it while you tune the rules.
 
-Two practical notes. Write regular expressions between single quotes: inside double quotes TOML turns `\b` into a backspace character and the rule stops matching without any warning. And do not rely on subject rules alone for mail that must stay out: confidential messages often arrive under unrelated subjects, which is what body rules and `whole_thread` are for.
+Three practical notes. Write regular expressions between single quotes: inside double quotes TOML turns `\b` into a backspace character and the rule stops matching without any warning. Do not rely on subject rules alone for mail that must stay out: confidential messages often arrive under unrelated subjects, which is what body rules and `whole_thread` are for. And sender rules look at the `From` address of the message and of anything forwarded as an attachment, not at text pasted into a reply: a forward written inline ("---------- Forwarded message ----------") is caught only by subject and body rules.
 
 Folder names differ between providers and languages ("Deleted Items", "Papelera", "[Gmail]/Trash"). The report lists the names your accounts use.
 
@@ -167,15 +171,20 @@ Keep the list to folders whose contents you would not mind attaching by mistake.
 
 | Risk | What covers it |
 | --- | --- |
-| The assistant reads mail it should not | The filter runs before the index, and excluded mail is not stored |
+| The assistant reads mail it should not | The filter runs before the index, and excluded mail is not stored. It also looks inside forwarded messages and at attachment names, and checks attachment text when it is read |
 | The assistant goes around the filter by reading the profile or the index as plain files | Not something this server can prevent: deny your client's file tools access to both folders (example below) |
-| An email carries instructions aimed at the assistant (prompt injection) | No tool can send, delete, move or forward. Everything returned from an email is labelled as third-party content. `compose` only opens a window and you press Send |
+| An email carries instructions aimed at the assistant (prompt injection) | No tool can send, delete, move or forward. Headers, bodies and attachment text come inside markers with a random tag that changes on every call, so an email cannot fake the end of its own block. Control characters and bidirectional overrides are removed. `compose` only opens a window and you press Send |
 | `compose` smuggles extra fields through quotes or commas in the text | Every field is percent-encoded and addresses are validated; a test tries to inject a recipient through the body |
+| A program called `thunderbird` planted in a folder runs instead of Thunderbird | `compose` takes the executable from `thunderbird_exe`, from absolute `PATH` entries or from the standard install folders, never from the current folder; on Windows only a real `thunderbird.exe` |
 | An email gets the assistant to attach a private file | Attachments are off by default and limited to the folders you list; hidden files, the Thunderbird profile and the server's own files are always refused; you see the attachments before sending |
+| Another account on the same computer reads the index | On Linux and macOS the data folder is `700`; on Windows it sits in your own profile |
+| A malformed attachment exhausts memory | Office files that would inflate past 200 MB and PDF pages beyond 2,000 are not read; very long HTML is cut before parsing |
 | The server damages the Thunderbird profile | Files are opened read-only; a test checks that no profile file changes |
 | No trace of what the assistant looked at | `audit.log` next to the index records time, tool, query and returned ids, never mail text |
 
 Keep in mind that whatever the assistant reads through these tools is sent to your model provider like the rest of the conversation. The filter is the place to keep out what must not leave your computer.
+
+Be careful with what else your assistant may do without asking. If the reading tools run freely and so does a tool that reaches the internet (a web fetch, a browser, a shell), an email with hidden instructions could get the assistant to read another message and send it out, with no step for you to approve. Keep network tools on "ask", or the reading tools on "ask", but not both on "allow". And keep Python up to date: the server parses mail written by strangers with the standard library's email, HTML and zip modules, which receive security fixes in each patch release.
 
 Suggested permission rules for Claude Code (`~/.claude/settings.json`). They let the five reading tools run freely, ask before every compose window, and stop Claude's own file tools from opening the profile or the index. Adjust the paths to your system; the ones shown are for Windows:
 
@@ -220,7 +229,9 @@ The index is a single SQLite file with an FTS5 full-text table. It stores header
 
 ## Status
 
-Version 0.2.0. The test suite (20 cases on a synthetic profile, no real mail involved) runs on Windows, Linux and macOS with Python 3.12 and 3.13.
+Version 0.3.0. The test suite (27 cases on a synthetic profile, no real mail involved) runs on Windows, Linux and macOS with Python 3.12 and 3.13.
+
+To report a security problem, see [SECURITY.md](SECURITY.md); please do not open a public issue for it.
 
 With a real mailbox it has been used on Windows 10 with Thunderbird 160 and an IMAP account, where the first run indexes a couple of thousand messages in well under a minute and later calls take under a second. On Linux and macOS the profile and executable locations are implemented and unit-tested but have not been tried against a real installation yet. If you run it there, an issue saying whether it worked is welcome.
 
@@ -237,6 +248,10 @@ uv run python tests/test_server.py
 The tests build a throwaway Thunderbird profile in a temporary folder and never touch a real one. Exit code 0 means every case passed.
 
 The code is one module, `src/thunderbird_local_mcp/server.py`, organised in numbered sections: configuration, exclusion rules, profile and folders, Mork reader, mbox reader, index, attachments, compose, tools and command line.
+
+## Contact
+
+Bugs and feature requests: open an issue. Security problems: report them privately as [SECURITY.md](SECURITY.md) explains. For anything else, such as proposals or using it in your own work, write to dgonzalez@eead.csic.es.
 
 ## Licence
 
