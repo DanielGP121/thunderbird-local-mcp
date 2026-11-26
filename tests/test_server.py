@@ -614,7 +614,8 @@ def test_save_attachment():
         fresh_index()
         out = s.save_attachment(id="INBOX#3", attachment="notes.txt")
         first = saved / "notes.txt"
-        assert str(first) in out and first.read_bytes().decode("utf-8") == "nota de campo: floración 12 de marzo", out
+        # resolve(): a temp folder can come in its 8.3 short form (RUNNER~1) while the server reports the long one.
+        assert str(first.resolve()) in out and first.read_bytes().decode("utf-8") == "nota de campo: floración 12 de marzo", out
         s.save_attachment(id="INBOX#3", attachment="notes.txt")
         assert (saved / "notes (1).txt").is_file(), "an existing file must never be overwritten"
         s.save_attachment(id="INBOX#3", attachment="4")
