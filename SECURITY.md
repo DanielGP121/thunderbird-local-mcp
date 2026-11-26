@@ -16,7 +16,7 @@ Anything that breaks a promise in the README's security model, for example:
 
 - mail excluded by the privacy filter reaching the assistant through any tool;
 - a tool writing to the Thunderbird profile, or sending, moving or deleting mail;
-- an email getting `compose` to attach a file from outside the allowed folders, or to add a recipient or field the assistant did not pass;
+- an email getting `compose`, `reply` or `forward` to attach a file that is not allowed (outside the listed folders, or one of the always-refused files when any path is allowed), or to add a recipient or field the assistant did not pass;
 - the server running a program other than Thunderbird;
 - mail text written to `audit.log`.
 

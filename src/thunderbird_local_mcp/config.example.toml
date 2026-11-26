@@ -45,13 +45,23 @@ body_regex = []
 whole_thread = true
 
 [compose]
-# Folders compose() may attach files from, subfolders included. Empty: attachments are refused.
-# Even inside these folders, hidden files and folders (names starting with a dot), the Thunderbird
-# profile and this server's own files are never attached. Keep the list short: whatever is in
-# these folders could end up attached to a message an email asked the assistant to write.
+# Attachments for compose(), reply() and forward() are off until you allow them, in one of two ways.
+# Only from some folders, subfolders included. Keep the list short: whatever is in these folders
+# could end up attached to a message an email asked the assistant to write.
 # Use single quotes for Windows paths.
 # Example: attachment_dirs = ['C:\Users\me\Documents\To send', '~/Documents/to-send']
 attachment_dirs = []
+
+# Or from any folder. You still approve each call and see the attachments before sending.
+allow_any_path = false
+
+# Folders whose files are never attached, in either mode, on top of what is always refused: hidden
+# files and folders, the Thunderbird profile, this server's own files, credential stores, browser
+# profiles, and key and password files.
+# Example: never_attach = ['C:\Users\me\Documents\Confidential']
+never_attach = []
+
+# Edits to this file apply on the next call, without restarting the server.
 
 # Line that reply() writes above the quoted original. Placeholders: {date} (dd/mm/yyyy), {time}
 # (hh:mm) and {sender} (name, or address when there is no name).

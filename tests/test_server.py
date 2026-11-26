@@ -47,6 +47,8 @@ body_regex = {bodies}
 whole_thread = true
 [compose]
 attachment_dirs = {dirs}
+allow_any_path = {anypath}
+never_attach = {never}
 [attachments]
 save_dir = {save}
 """
@@ -192,10 +194,10 @@ GROUPS = (
 
 
 def write_config(senders='["@journal.example"]', subjects='["invitation to review"]', dirs="[]", bodies="[]",
-                 save="''"):
+                 save="''", anypath="false", never="[]"):
     Path(os.environ["TB_CONFIG"]).write_text(
         CONFIG.format(profile=PROFILE.as_posix(), senders=senders, subjects=subjects, dirs=dirs, bodies=bodies,
-                      save=save),
+                      save=save, anypath=anypath, never=never),
         encoding="utf-8")
 
 
@@ -649,6 +651,67 @@ def test_save_attachment():
     assert "\tsave_attachment\tsaved\t" in log and "nota de campo" not in log
 
 
+def test_any_path_and_secret_files():
+    blocked = s.private_paths(PROFILE)
+    spot = TMP / "anywhere"
+    (spot / "review").mkdir(parents=True, exist_ok=True)
+    plain = spot / "informe.pdf"
+    plain.write_bytes(b"%PDF-1.4 test")
+    assert s.check_attachments([str(plain)], [], blocked, any_path=True) == [plain.resolve()]
+    raises(lambda: s.check_attachments([str(plain)], [], blocked), "allow_any_path = true")  # the error names the line
+    hidden = TMP / ".private" / "a.txt"
+    hidden.parent.mkdir()
+    hidden.write_text("x", encoding="utf-8")
+    raises(lambda: s.check_attachments([str(hidden)], [], blocked, any_path=True), "hidden")
+    for name in ("id_ed25519", "passwords.kdbx", "cert.PFX", "putty.ppk"):
+        f = spot / name
+        f.write_bytes(b"x")
+        raises(lambda f=f: s.check_attachments([str(f)], [], blocked, any_path=True), "key or password")
+    key = spot / "server.key"
+    key.write_bytes(b"-----BEGIN PRIVATE KEY-----\nMIIEvQ\n")
+    raises(lambda: s.check_attachments([str(key)], [], blocked, any_path=True), "private key")
+    deck = spot / "slides.key"  # a Keynote presentation is a zip, not a key
+    deck.write_bytes(b"PK\x03\x04 keynote")
+    assert s.check_attachments([str(deck)], [], blocked, any_path=True) == [deck.resolve()]
+    note = spot / "notes.txt"
+    note.write_bytes(b"server notes\n-----BEGIN OPENSSH PRIVATE KEY-----\nb3Blbg\n")
+    raises(lambda: s.check_attachments([str(note)], [], blocked, any_path=True), "private key")
+    secret = spot / "review" / "manuscript.pdf"
+    secret.write_bytes(b"%PDF-1.4")
+    raises(lambda: s.check_attachments([str(secret)], [], blocked, any_path=True, never=[str(spot / "review")]),
+           "never_attach")
+    raises(lambda: s.check_attachments([str(plain)], [], blocked, any_path=True, never=["relative/x"]), "absolute path")
+    raises(lambda: s.check_attachments([str(INBOX)], [], blocked, any_path=True), "Thunderbird profile")
+    win = s.secret_stores("win32", {"APPDATA": "C:/R", "LOCALAPPDATA": "C:/L"}, Path("C:/Users/u"))
+    assert Path("C:/R/rclone") in win and Path("C:/L/Google/Chrome/User Data") in win and Path("C:/R/Mozilla") in win
+    assert Path("/Users/u/Library/Keychains") in s.secret_stores("darwin", {}, Path("/Users/u"))
+    assert Path("/home/u/.ssh") in s.secret_stores("linux", {}, Path("/home/u"))
+
+
+def test_config_reload_without_restart():
+    doc = TMP / "anywhere" / "informe.pdf"
+    launched: list[list[str]] = []
+    real = s.subprocess.Popen, s.thunderbird_exe
+    s.subprocess.Popen = lambda args, **kw: launched.append(args)
+    s.thunderbird_exe = lambda cfg: Path("thunderbird")
+    try:
+        write_config()
+        fresh_index()
+        raises(lambda: s.compose(to="a@b.org", attachments=[str(doc)]), "switched off")
+        write_config(anypath="true")  # no fresh_index(): the next call must pick the change up by itself
+        assert "attaching informe.pdf" in s.compose(to="a@b.org", attachments=[str(doc)])
+        Path(os.environ["TB_CONFIG"]).write_text("half = [edited", encoding="utf-8")
+        out = s.compose(to="a@b.org", attachments=[str(doc)])
+        assert "attaching informe.pdf" in out and "could not be read" in out, out  # last good settings, user told
+        write_config(senders="[]", subjects="[]")  # new exclusion rules apply without a restart too
+        assert "would you review" in s.get_message(id="INBOX#4")
+        assert "could not be read" not in s.get_message(id="INBOX#1")
+    finally:
+        s.subprocess.Popen, s.thunderbird_exe = real
+        write_config()
+        fresh_index()
+
+
 def test_audit_log_has_no_mail_text():
     log = (Path(os.environ["TB_DATA_DIR"]) / "audit.log").read_text(encoding="utf-8")
     for phrase in ("Adjunto los ficheros", "Plazo abierto", "floración 12", "would you review", "Dormancy release"):
@@ -711,7 +774,8 @@ def test_init_and_bundled_example():
     cfg = s.load_config(target)
     assert cfg["exclude"]["folders"][:3] == ["trash", "spam", "junk"] and cfg["exclude"]["whole_thread"] is True
     assert cfg["profile"] == "" and cfg["thunderbird_exe"] == ""
-    assert cfg["attachment_dirs"] == [], "attachments must ship switched off"
+    assert cfg["attachment_dirs"] == [] and cfg["allow_any_path"] is False, "attachments must ship switched off"
+    assert cfg["never_attach"] == [] and cfg["save_dir"] == ""
     s.Exclusions(cfg["exclude"])  # every pattern in the bundled example compiles
 
 
@@ -905,6 +969,8 @@ MUTATING = [
     test_reply_quote_as_thunderbird_writes_it,
     test_reply_and_forward_tools,
     test_save_attachment,
+    test_any_path_and_secret_files,
+    test_config_reload_without_restart,
     test_audit_log_has_no_mail_text,
 ]
 REVIEW = [

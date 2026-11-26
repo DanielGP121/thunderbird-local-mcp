@@ -47,12 +47,12 @@ The price of that design: only mail with an offline copy on this computer is vis
 1. Install the command, pinned to a release:
 
    ```
-   uv tool install git+https://github.com/DanielGP121/thunderbird-local-mcp@v0.5.0
+   uv tool install git+https://github.com/DanielGP121/thunderbird-local-mcp@v0.6.0
    ```
 
-   With pipx: `pipx install git+https://github.com/DanielGP121/thunderbird-local-mcp@v0.5.0`
+   With pipx: `pipx install git+https://github.com/DanielGP121/thunderbird-local-mcp@v0.6.0`
 
-   Keep the `@v0.5.0`. Without it you install whatever the main branch holds that day, and an update reaches you only when you choose to install it. The [releases page](https://github.com/DanielGP121/thunderbird-local-mcp/releases) lists the versions.
+   Keep the `@v0.6.0`. Without it you install whatever the main branch holds that day, and an update reaches you only when you choose to install it. The [releases page](https://github.com/DanielGP121/thunderbird-local-mcp/releases) lists the versions.
 
 2. Create the configuration file. The command prints where it put it:
 
@@ -95,7 +95,7 @@ The price of that design: only mail with an offline copy on this computer is vis
      "mcpServers": {
        "thunderbird": {
          "command": "uvx",
-         "args": ["--from", "git+https://github.com/DanielGP121/thunderbird-local-mcp@v0.5.0", "thunderbird-local-mcp"]
+         "args": ["--from", "git+https://github.com/DanielGP121/thunderbird-local-mcp@v0.6.0", "thunderbird-local-mcp"]
        }
      }
    }
@@ -112,7 +112,9 @@ Then ask things like "what arrived from the university this week?", "summarise t
 | `profile` | Thunderbird profile folder | The profile named in Thunderbird's `profiles.ini` |
 | `thunderbird_exe` | Thunderbird executable, used only by `compose` | Looked up on `PATH` and in the standard install folders |
 | `[exclude]` | The privacy filter | Ships excluding the Trash, Spam and Junk folders |
-| `[compose] attachment_dirs` | Folders `compose` may attach files from (see [Attachments](#attachments)) | Attachments are refused |
+| `[compose] attachment_dirs` | Folders `compose`, `reply` and `forward` may attach files from (see [Attachments](#attachments)) | Attachments are refused, unless `allow_any_path` is on |
+| `[compose] allow_any_path` | `true` lets them attach files from any folder, minus what is always refused | `false` |
+| `[compose] never_attach` | Folders never attached from, in either mode | Only the built-in refusals apply |
 | `[attachments] save_dir` | Folder `save_attachment` writes to (see [Saving attachments](#saving-attachments)) | Saving is refused |
 
 Where things live:
@@ -153,25 +155,30 @@ Folder names differ between providers and languages ("Deleted Items", "Papelera"
 
 ## Attachments
 
-`compose` can attach local files to the window it opens. This is off until you name the folders it may take files from:
+`compose`, `reply` and `forward` can attach local files to the window they open. This is off until you choose one of two modes in the `[compose]` section of `config.toml`:
 
 ```toml
 [compose]
+# Only from some folders (and their subfolders):
 attachment_dirs = ['C:\Users\me\Documents\To send']
+# Or from anywhere:
+allow_any_path = true
+# Never from these folders, in either mode:
+never_attach = ['C:\Users\me\Documents\Confidential']
 ```
 
-The assistant then passes absolute paths in `attachments`, and the server checks each one before anything opens:
+The assistant passes absolute paths in `attachments`, and the server checks each one before anything opens. Links are resolved first, so a link cannot point somewhere else. Whatever the mode, these are always refused:
 
-- The file has to be inside one of those folders, subfolders included. Links are resolved first, so a link cannot point outside.
-- Hidden files and folders below them (names starting with a dot, such as `.git` or `.env`) are refused.
-- The Thunderbird profile and the server's own files (`config.toml`, the index and the log) are refused even if a listed folder contains them. The profile holds the mail your filter keeps out, and the config says what you consider confidential.
-- Files over 50 MB are refused.
+- **Hidden files and folders** (names starting with a dot, such as `.ssh`, `.git` or `.env`): below the listed folders, or anywhere in the path when any path is allowed.
+- **The Thunderbird profile and the server's own files** (`config.toml`, the index and the log). The profile holds the mail your filter keeps out, and the config says what you consider confidential.
+- **Credential stores and browser profiles**: rclone's configuration, Firefox, Chrome, Edge, Brave and Vivaldi profiles, the Windows credential and key folders, and the macOS keychains.
+- **Key and password files**: `.pem`, `.p12`, `.pfx`, `.ppk`, `.kdbx`, `.kdb`, `.jks` and `.keystore` files, SSH keys such as `id_ed25519`, and any file whose beginning holds a private key block. (`.key` files are judged by their content, because Keynote presentations use that extension too.)
+- **Anything inside a folder listed in `never_attach`.**
+- **Files over 50 MB.**
 
-If any file fails a check, no window opens. Changing `attachment_dirs` takes effect when the server restarts and does not rebuild the index.
+If any file fails a check, no window opens, and the error says what to change. Edits to `config.toml` apply on the next call without restarting the server; if the file has a mistake, the server keeps the last settings that worked and tells you so.
 
-Keep the list to folders whose contents you would not mind attaching by mistake. An email can contain instructions aimed at the assistant, and the server cannot stop the assistant from first copying a file into an allowed folder with its other tools. You still see every attachment in the window before pressing Send.
-
-`reply` and `forward` accept the same `attachments` with the same checks.
+Choose the mode with this in mind: an email can contain instructions aimed at the assistant. With `allow_any_path`, what stands between such an email and a private file is the list above, your approval of each call (keep these tools on "ask") and your look at the window before pressing Send. With `attachment_dirs`, keep the list to folders whose contents you would not mind attaching by mistake. In both modes the server cannot stop the assistant from first copying a file somewhere else with its other tools.
 
 ## Replies and forwards
 
@@ -214,7 +221,7 @@ The assistant gets back the path and nothing of the content. Treat the file like
 | `compose`, `reply` or `forward` smuggle extra fields through quotes or commas in the text | Every field is percent-encoded and addresses are validated; a test tries to inject a recipient through the body |
 | An email gets the assistant to reply to or forward a message you keep out | `reply` and `forward` refuse messages the privacy filter excludes, like the reading tools |
 | A program called `thunderbird` planted in a folder runs instead of Thunderbird | `compose` takes the executable from `thunderbird_exe`, from absolute `PATH` entries or from the standard install folders, never from the current folder; on Windows only a real `thunderbird.exe` |
-| An email gets the assistant to attach a private file | Attachments are off by default and limited to the folders you list; hidden files, the Thunderbird profile and the server's own files are always refused; you see the attachments before sending |
+| An email gets the assistant to attach a private file | Attachments are off by default; on, they come from the folders you list or, with `allow_any_path`, from anywhere. Hidden files, the Thunderbird profile, the server's own files, credential stores, browser profiles, key and password files and your `never_attach` folders are always refused; you approve each call and see the attachments before sending |
 | A saved attachment overwrites a file, escapes its folder or passes for something else | `save_attachment` writes only into `save_dir`, never overwrites, reduces the sender's file name to a plain one (no folders, no disguised extensions) and marks the file as downloaded from the Internet on Windows |
 | Another account on the same computer reads the index | On Linux and macOS the data folder is `700`; on Windows it sits in your own profile |
 | A malformed attachment exhausts memory | Office files that would inflate past 200 MB and PDF pages beyond 2,000 are not read; very long HTML is cut before parsing |
@@ -274,7 +281,7 @@ The index is a single SQLite file with an FTS5 full-text table. It stores header
 
 ## Status
 
-Version 0.5.0. The test suite (32 cases on a synthetic profile, no real mail involved) runs on Windows, Linux and macOS with Python 3.12 and 3.13.
+Version 0.6.0. The test suite (34 cases on a synthetic profile, no real mail involved) runs on Windows, Linux and macOS with Python 3.12 and 3.13.
 
 To report a security problem, see [SECURITY.md](SECURITY.md); please do not open a public issue for it.
 

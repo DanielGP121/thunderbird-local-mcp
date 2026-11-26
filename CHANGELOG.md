@@ -2,6 +2,14 @@
 
 All notable changes to this project are listed here. Versions follow [Semantic Versioning](https://semver.org/).
 
+## 0.6.0 (2026-11-26)
+
+- Attachments from any folder: `allow_any_path = true` in `[compose]` lets `compose`, `reply` and `forward` attach files from anywhere. It stays off by default, as does `attachment_dirs`.
+- More files are always refused, in every mode: hidden files and folders anywhere in the path when any path is allowed, credential stores (rclone, Windows credentials and keys, macOS keychains), browser profiles, key and password files by extension or name (`.pem`, `.p12`, `.pfx`, `.ppk`, `.kdbx`, `id_ed25519`...), and any file that starts with a private key block. `.key` files are judged by their content, since Keynote uses that extension.
+- New `[compose] never_attach` list of folders that are never attached from.
+- `config.toml` is read again whenever it changes, so edits apply on the next call without restarting; new exclusion rules rebuild the index on their own. If the file has a mistake, the last good settings stay in use and the tool output says so.
+- Refusals say what to change, for example which line to add to `config.toml`.
+
 ## 0.5.0 (2026-11-26)
 
 - `reply` opens with the assistant's text already in the window. Without attachments it builds a `mailto:` reply with `In-Reply-To` and `References` (Thunderbird 160 keeps them, so the reply stays in the conversation), the recipients (`Reply-To` or sender, plus To and Cc for a reply to all, minus the user's own addresses from `prefs.js`) and, below a header line, the original quoted as Thunderbird's Reply button quotes it: an HTML body (`html-body`) with a `blockquote type="cite"`, nested once more for each earlier quote level. A `format=flowed` original is unwrapped first, and lines that were only typed with a `>` stay text. A quote passed as plain text arrived as literal `>` characters, because Thunderbird space-stuffs such lines when it sends `format=flowed`. The original is not marked as replied in this mode.

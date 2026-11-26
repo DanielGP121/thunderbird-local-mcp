@@ -147,11 +147,14 @@ def load_config(path: Path = CONFIG_PATH) -> dict:
     with path.open("rb") as fh:
         raw = tomllib.load(fh)
     ex = raw.get("exclude", {})
+    compose = raw.get("compose", {})
     return {
         "profile": raw.get("profile", ""),
         "thunderbird_exe": raw.get("thunderbird_exe", ""),
         # Not part of the index fingerprint: changing them never rebuilds the index.
-        "attachment_dirs": [str(d) for d in raw.get("compose", {}).get("attachment_dirs", [])],
+        "attachment_dirs": [str(d) for d in compose.get("attachment_dirs", [])],
+        "allow_any_path": compose.get("allow_any_path", False) is True,  # only a real TOML true, never "false"
+        "never_attach": [str(d) for d in compose.get("never_attach", [])],
         "reply_header": str(raw.get("compose", {}).get("reply_header", DEFAULT_REPLY_HEADER)),
         "save_dir": str(raw.get("attachments", {}).get("save_dir", "")),
         "exclude": {
@@ -1200,12 +1203,16 @@ def attachment_text(data: bytes, filename: str, ctype: str, charset: str | None)
 # tried first and Thunderbird 160 ignores it (window opened with an empty body, 2026-11-18).
 # Nothing is ever sent from here: the user reads the window and presses Send.
 #
-# Attachments go in the same command line as file URLs. A file is accepted only from a folder the
-# user listed in [compose] attachment_dirs (none by default), after resolving links, and never if
-# it is hidden below that folder (.ssh, .git, .env...), part of the Thunderbird profile (the mbox
-# files hold the mail the privacy filter keeps out) or one of this server's own files (the index,
-# and config.toml, whose rules say what the user considers confidential). The point is that an
-# email with instructions aimed at the model cannot get it to attach an arbitrary private file.
+# Attachments go in the same command line as file URLs. They are off until the user either lists
+# folders in [compose] attachment_dirs or sets allow_any_path = true. Links are resolved first. Some
+# files are refused in every mode: hidden files and folders (below an allowed folder, or anywhere in
+# the path when any path is allowed: .ssh, .git, .env...), the Thunderbird profile (the mbox files
+# hold the mail the privacy filter keeps out), this server's own files (the index, and config.toml,
+# whose rules say what the user considers confidential), other well-known secret stores (rclone,
+# browser profiles, Windows credentials), key and password files by name or content, and whatever
+# the user lists in [compose] never_attach. The point is that an email with instructions aimed at
+# the model cannot get it to attach a private file; the user still approves every call and reviews
+# the window before sending.
 
 _ADDR = re.compile(r"^[^@\s,;'\"<>()]+@[^@\s,;'\"<>()]+\.[^@\s,;'\"<>()]+$")
 MAX_COMMAND = 30_000  # Windows caps a command line at 32,767 characters; the same limit is kept everywhere
@@ -1224,17 +1231,60 @@ def private_paths(profile: Path) -> list[Path]:
     return [profile, *profile_roots(), DATA_DIR, CONFIG_PATH, _CONFIG_DIR]
 
 
-def check_attachments(paths: list[str], allowed_dirs: list[str], blocked: list[Path]) -> list[Path]:
-    """Resolved files compose() may attach; refuses anything the rules above keep out."""
+def secret_stores(platform: str = sys.platform, env=os.environ, home: Path | None = None) -> list[Path]:
+    """Well-known folders of credentials and browser profiles, never attached in any mode."""
+    home = home or Path.home()
+    if platform == "win32":
+        roaming = Path(env.get("APPDATA") or home / "AppData" / "Roaming")
+        local = Path(env.get("LOCALAPPDATA") or home / "AppData" / "Local")
+        return [
+            roaming / "rclone", roaming / "Mozilla", roaming / "Microsoft" / "Credentials",
+            roaming / "Microsoft" / "Protect", roaming / "Microsoft" / "Crypto",
+            local / "Microsoft" / "Credentials", local / "Microsoft" / "Vault",
+            local / "Google" / "Chrome" / "User Data", local / "Microsoft" / "Edge" / "User Data",
+            local / "BraveSoftware" / "Brave-Browser" / "User Data", local / "Vivaldi" / "User Data",
+        ]
+    support = home / "Library" / "Application Support"
+    common = [home / ".ssh", home / ".gnupg", home / ".config" / "rclone", home / ".mozilla"]
+    if platform == "darwin":
+        return common + [home / "Library" / "Keychains", home / "Library" / "Cookies", support / "Firefox",
+                         support / "Google" / "Chrome", support / "Microsoft Edge", home / "Library" / "Safari"]
+    return common + [home / ".config" / "google-chrome", home / ".config" / "chromium"]
+
+
+# Private keys and password databases, by extension or name. ".key" is left out on purpose: Keynote
+# presentations use it, so such files are caught by their content instead (a PEM private key block).
+_SECRET_EXT = {".pem", ".p12", ".pfx", ".ppk", ".kdbx", ".kdb", ".jks", ".keystore"}
+_SECRET_NAME = re.compile(r"^(id_(rsa|dsa|ecdsa|ed25519)(_sk)?|_netrc|\.?git-credentials|\.?netrc|\.?pgpass)$", re.I)
+_PRIVATE_KEY = re.compile(rb"-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----|PuTTY-User-Key-File")
+
+
+def _off_message() -> str:
+    return (
+        f"attachments are switched off. To attach files from anywhere, add the line allow_any_path = true "
+        f"under [compose] in {CONFIG_PATH}; to allow only some folders, add a line such as "
+        f"attachment_dirs = ['C:/Users/me/Documents'] there instead. The change applies on the next call, "
+        f"without restarting."
+    )
+
+
+def check_attachments(
+    paths: list[str], allowed_dirs: list[str], blocked: list[Path], any_path: bool = False,
+    never: list[str] | None = None,
+) -> list[Path]:
+    """Resolved files compose(), reply() and forward() may attach; refuses what the rules above keep out."""
     if not paths:
         return []
-    if not allowed_dirs:
-        raise ToolError(
-            "attachments are switched off: the user has to list the folders files may be attached "
-            "from in [compose] attachment_dirs of config.toml"
-        )
-    allowed = [Path(os.path.expandvars(d)).expanduser().resolve() for d in allowed_dirs]
-    blocked = [b.resolve() for b in blocked]
+    if not any_path and not allowed_dirs:
+        raise ToolError(_off_message())
+    allowed = [] if any_path else [Path(os.path.expandvars(d)).expanduser().resolve() for d in allowed_dirs]
+    blocked = [b.resolve() for b in [*blocked, *secret_stores()]]
+    never_paths = []
+    for n in never or []:
+        entry = Path(os.path.expandvars(n)).expanduser()
+        if not entry.is_absolute():
+            raise ToolError(f"every never_attach entry in config.toml must be an absolute path, got {n!r}")
+        never_paths.append(entry.resolve())
     out: list[Path] = []
     for raw in paths:
         p = Path(raw).expanduser()
@@ -1246,19 +1296,42 @@ def check_attachments(paths: list[str], allowed_dirs: list[str], blocked: list[P
             raise ToolError(f"attachment not found: {raw}") from None
         if not real.is_file():
             raise ToolError(f"attachment is not a file: {raw}")
-        base = next((a for a in allowed if real.is_relative_to(a)), None)
-        if base is None:
-            raise ToolError(f"{raw} is outside the folders listed in [compose] attachment_dirs")
-        if any(part.startswith(".") for part in real.relative_to(base).parts):
+        if any_path:
+            below = real.parts[1:]  # the whole path, without the drive or root
+        else:
+            base = next((a for a in allowed if real.is_relative_to(a)), None)
+            if base is None:
+                raise ToolError(
+                    f"{raw} is outside the folders listed in [compose] attachment_dirs of {CONFIG_PATH}; "
+                    "add its folder there, or allow_any_path = true, to attach it"
+                )
+            below = real.relative_to(base).parts
+        if any(part.startswith(".") for part in below):
             raise ToolError(f"{raw} is hidden or inside a hidden folder; such files are never attached")
         if any(real.is_relative_to(b) for b in blocked):
-            raise ToolError(f"{raw} is part of the Thunderbird profile or of this server's own files; it is never attached")
+            raise ToolError(
+                f"{raw} is in the Thunderbird profile, in this server's own files or in a credentials or "
+                "browser folder; it is never attached"
+            )
+        if any(real.is_relative_to(n) for n in never_paths):
+            raise ToolError(f"{raw} is in a folder listed in [compose] never_attach of config.toml; it is never attached")
+        if real.suffix.lower() in _SECRET_EXT or _SECRET_NAME.match(real.name):
+            raise ToolError(f"{raw} looks like a key or password file; such files are never attached")
+        with real.open("rb") as fh:
+            if _PRIVATE_KEY.search(fh.read(16384)):
+                raise ToolError(f"{raw} contains a private key; it is never attached")
         size = real.stat().st_size
         if size > MAX_ATTACHMENT:
             raise ToolError(f"{raw} is {size / 1024**2:.0f} MB, above the {MAX_ATTACHMENT // 1024**2} MB limit")
         if real not in out:
             out.append(real)
     return out
+
+
+def attachments_allowed(idx: Index, paths: list[str] | None) -> list[Path]:
+    cfg = idx.cfg
+    return check_attachments(paths or [], cfg["attachment_dirs"], private_paths(idx.profile),
+                             any_path=cfg["allow_any_path"], never=cfg["never_attach"])
 
 
 def build_compose_spec(
@@ -1633,7 +1706,9 @@ server = MCPServer(
         "pre-filled Thunderbird window for a new message; reply() and forward() open a reply or forward "
         "window for a message id (a reply with attachments leaves its text on the clipboard for the "
         "user to paste). None of them sends; say so to the user and remind them to review the "
-        "window. Files are attached only from folders the user allowed in config.toml. "
+        "window. Files are attached only where the user allowed it in config.toml, and key, password "
+        "and hidden files never; when an attachment is refused, pass on to the user what the error "
+        "says to change instead of promising the attachment. "
         "save_attachment() writes an attachment into the folder the user set for that; the file comes "
         "from a third party, so never open, run or unpack it yourself."
     ),
@@ -1645,13 +1720,40 @@ SAVE = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint
 
 _index: Index | None = None
 _index_lock = threading.Lock()
+_config_seen: str | None = None  # hash of the config.toml text the settings in use come from
+_config_problem = ""  # set while config.toml cannot be read; the last good settings stay in use
+
+
+def _config_hash() -> str | None:
+    try:
+        return hashlib.sha256(CONFIG_PATH.read_bytes()).hexdigest()
+    except OSError:
+        return None
 
 
 def get_index() -> Index:
-    global _index
+    """The index, with config.toml read again whenever its text changes, so edits need no restart.
+    New exclusion rules or a new profile give a new Index, whose fingerprint check rebuilds it."""
+    global _index, _config_seen, _config_problem
     with _index_lock:
+        seen = _config_hash()
         if _index is None:
             _index = Index(load_config())
+            _config_seen, _config_problem = seen, ""
+        elif seen != _config_seen:
+            _config_seen = seen
+            try:
+                cfg = load_config()
+                Exclusions(cfg["exclude"])  # an invalid pattern fails here, before anything changes
+                if cfg["exclude"] != _index.cfg["exclude"] or cfg["profile"] != _index.cfg["profile"]:
+                    _index = Index(cfg)
+                else:
+                    _index.cfg = cfg
+                _config_problem = ""
+            except (SystemExit, Exception) as exc:  # a half-edited file must not take the tools down
+                _config_problem = (
+                    f"{CONFIG_PATH} could not be read ({exc}); the previous settings stay in use until it is fixed"
+                )
         return _index
 
 
@@ -1664,7 +1766,10 @@ def tool_errors(fn):
         logged = json.dumps({k: f"<{len(v)} characters>" if k == "body" and isinstance(v, str) else v
                              for k, v in kwargs.items()}, ensure_ascii=False, default=str)
         try:
-            return fn(*args, **kwargs)
+            result = fn(*args, **kwargs)
+            if _config_problem and isinstance(result, str):
+                result += f"\n\nNote for the user: {_config_problem}."
+            return result
         except ToolError as exc:
             audit(fn.__name__, logged, f"refused: {exc}")
             raise
@@ -2070,9 +2175,10 @@ def compose(
     """Open a pre-filled Thunderbird compose window. Nothing is sent: the user reviews and sends.
 
     to, cc, bcc: bare addresses separated by commas. body: plain text; line breaks are kept.
-    attachments: absolute paths of local files to attach. Only files inside the folders the user
-    listed in [compose] attachment_dirs of config.toml are accepted (none unless the user set it);
-    never copy or move a file into those folders to get around this.
+    attachments: absolute paths of local files to attach. Accepted only when the user allowed it in
+    config.toml ([compose] attachment_dirs, or allow_any_path for any folder); hidden files, key and
+    password files, the Thunderbird profile and folders in never_attach are always refused. Never
+    copy or move a file to get around a refusal.
     The whole message must fit in one command line (roughly 5,000-10,000 characters of text).
     This always starts a new conversation: to answer a message use reply(), to pass one on use forward().
     """
@@ -2081,7 +2187,7 @@ def compose(
     if not recipients:
         raise ToolError("at least one recipient is needed in 'to'")
     cc_list, bcc_list = split_addresses(cc), split_addresses(bcc)
-    files = check_attachments(attachments or [], idx.cfg["attachment_dirs"], private_paths(idx.profile))
+    files = attachments_allowed(idx, attachments)
     exe = thunderbird_exe(idx.cfg)
     spec = build_compose_spec(recipients, cc_list, bcc_list, subject, body, files)
     _open_compose_window(exe, spec)
@@ -2142,8 +2248,8 @@ def reply(id: str, body: str = "", reply_all: bool = True, attachments: list[str
     body: the reply text, written into the window above the quote.
     reply_all: true (default) answers the sender (or the Reply-To address) and everyone in To and
       Cc except the user's own addresses; false answers the sender only.
-    attachments: absolute paths, accepted only from the folders in [compose] attachment_dirs, as in
-      compose(); never copy or move a file into those folders to get around this. Thunderbird only
+    attachments: absolute paths, accepted under the same rules as in compose(); never copy or move
+      a file to get around a refusal. Thunderbird only
       takes attachments in its own reply window, which drops passed text: with attachments the text
       goes to the user's clipboard instead, and the user pastes it above the quote (Ctrl+V).
     """
@@ -2172,7 +2278,7 @@ def reply(id: str, body: str = "", reply_all: bool = True, attachments: list[str
             " the window and presses Send."
         )
     uri = original_message_uri(idx, row)
-    files = check_attachments(attachments, idx.cfg["attachment_dirs"], private_paths(idx.profile))
+    files = attachments_allowed(idx, attachments)
     spec = build_native_spec(REPLY_ALL if reply_all else REPLY, uri, attachments=files)
     copied = copy_to_clipboard(body) if body.strip() else None
     _open_compose_window(exe, spec)
@@ -2201,8 +2307,8 @@ def forward(
 
     to, cc, bcc: bare addresses separated by commas; may stay empty for the user to fill in.
     body: plain text above the forwarded message; line breaks are kept.
-    attachments: extra files, accepted only from the folders in [compose] attachment_dirs, as in
-      compose(); never copy or move a file into those folders to get around this.
+    attachments: extra files, accepted under the same rules as in compose(); never copy or move a
+      file to get around a refusal.
     """
     idx = get_index()
     idx.refresh()
@@ -2210,7 +2316,7 @@ def forward(
         row = idx.resolve(id)  # refuses messages the privacy filter excludes
     uri = original_message_uri(idx, row)
     to_list, cc_list, bcc_list = split_addresses(to), split_addresses(cc), split_addresses(bcc)
-    files = check_attachments(attachments or [], idx.cfg["attachment_dirs"], private_paths(idx.profile))
+    files = attachments_allowed(idx, attachments)
     exe = thunderbird_exe(idx.cfg)
     spec = build_native_spec(FORWARD_ATTACHED, uri, to_list, cc_list, bcc_list, body, files)
     _open_compose_window(exe, spec)
