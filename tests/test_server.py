@@ -47,6 +47,8 @@ body_regex = {bodies}
 whole_thread = true
 [compose]
 attachment_dirs = {dirs}
+[attachments]
+save_dir = {save}
 """
 
 
@@ -189,9 +191,11 @@ GROUPS = (
 )
 
 
-def write_config(senders='["@journal.example"]', subjects='["invitation to review"]', dirs="[]", bodies="[]"):
+def write_config(senders='["@journal.example"]', subjects='["invitation to review"]', dirs="[]", bodies="[]",
+                 save="''"):
     Path(os.environ["TB_CONFIG"]).write_text(
-        CONFIG.format(profile=PROFILE.as_posix(), senders=senders, subjects=subjects, dirs=dirs, bodies=bodies),
+        CONFIG.format(profile=PROFILE.as_posix(), senders=senders, subjects=subjects, dirs=dirs, bodies=bodies,
+                      save=save),
         encoding="utf-8")
 
 
@@ -469,7 +473,7 @@ def test_accounts_and_message_uris():
     folder.mkdir()
     (folder / "prefs.js").write_text(PREFS, encoding="utf-8")
     prefs = s.read_mail_prefs(folder)
-    assert "browser.cache.disk.capacity" not in prefs and "mail.identity.id1.useremail" not in prefs
+    assert "browser.cache.disk.capacity" not in prefs and s.own_addresses(prefs) == {"alex@example.org"}
     assert prefs["mail.server.server3.name"] == 'Quote "inside" name'
     accounts = s.mail_accounts(folder, prefs)
     assert set(accounts) == {(True, "imap.example.org"), (False, "Local Folders")}, accounts
@@ -482,8 +486,67 @@ def test_accounts_and_message_uris():
     raises(lambda: s.original_message_uri(s.get_index(), row), "provisional")
 
 
+def test_reply_recipients_and_quote():
+    from urllib.parse import parse_qs, unquote, urlsplit
+
+    own = {"alex@example.org"}
+    found = {"sender": "Ana <ana@example.org>", "to": "alex@example.org, Marta <marta@example.org>",
+             "cc": "luis@example.org, ALEX@example.org"}
+    assert s.reply_recipients(found, "", own, True) == (["ana@example.org"], ["marta@example.org", "luis@example.org"])
+    assert s.reply_recipients(found, "", own, False) == (["ana@example.org"], [])
+    assert s.reply_recipients(found, "Lista <lista@lists.example>", own, False) == (["lista@lists.example"], [])
+    mine = {"sender": "Alex <alex@example.org>", "to": "ana@example.org", "cc": "alex@example.org"}
+    assert s.reply_recipients(mine, "", own, True) == (["ana@example.org"], []), "own message: answer its recipients"
+    assert s.reply_header("El {date} a las {time}, {sender} escribió:", "2026-11-25 13:07",
+                          "Ana Martínez <ana@example.org>") == "El 25/11/2026 a las 13:07, Ana Martínez escribió:"
+    assert s.reply_header("{x} {sender}", "", "ana@example.org") == "{x} ana@example.org"
+    text = "Gracias.\nfrom=x&cc=evil@example.org"
+    url = s.build_reply_mailto(["ana@example.org"], ["marta@example.org"], "Re: Informe", "m1@test", ["m0@test"],
+                               text, "Ana wrote:", "Línea 1\n\nLínea 3")
+    parts = urlsplit(url)
+    q = {k: v[0] for k, v in parse_qs(parts.query, keep_blank_values=True).items()}
+    assert parts.scheme == "mailto" and unquote(parts.path) == "ana@example.org"
+    assert set(q) == {"subject", "cc", "in-reply-to", "references", "html-body"}, q  # no field smuggled in through the text
+    assert q["cc"] == "marta@example.org" and q["in-reply-to"] == "<m1@test>" and q["references"] == "<m0@test> <m1@test>"
+    assert q["html-body"] == (
+        "Gracias.<br>from=x&amp;cc=evil@example.org<br><br>"
+        '<div class="moz-cite-prefix">Ana wrote:<br></div>'
+        '<blockquote type="cite"><pre class="moz-quote-pre" wrap="">Línea 1\n\nLínea 3</pre></blockquote>'
+    ), q["html-body"]
+    long = "\n".join(f"line {i} " + "x" * 80 for i in range(2000))
+    url = s.build_reply_mailto(["ana@example.org"], [], "Re: x", "m1@test", [], "Hola", "Ana wrote:", long)
+    assert len(url) <= s.MAX_COMMAND and "%5B...%5D%3C%2Fpre%3E%3C%2Fblockquote%3E" in url and "Hola" in url, \
+        "quote shortened, text kept"
+    raises(lambda: s.build_reply_mailto(["a@b.org"], [], "x", "", [], "x" * 40000, "h", ""), "too long")
+
+
+def test_reply_quote_as_thunderbird_writes_it():
+    # Earlier quote levels become nested blockquotes, as with Thunderbird's Reply button.
+    lines = s.quote_lines("Visto.\n\n> Hola:\n> > Primera\n>> Segunda\n> Fin\nFirma")
+    assert lines == [(0, "Visto."), (0, ""), (1, "Hola:"), (2, "Primera"), (2, "Segunda"), (1, "Fin"), (0, "Firma")], lines
+    assert s.quote_html(lines) == (
+        '<blockquote type="cite"><pre class="moz-quote-pre" wrap="">Visto.\n</pre>'
+        '<blockquote type="cite"><pre class="moz-quote-pre" wrap="">Hola:</pre>'
+        '<blockquote type="cite"><pre class="moz-quote-pre" wrap="">Primera\nSegunda</pre></blockquote>'
+        '<pre class="moz-quote-pre" wrap="">Fin</pre></blockquote>'
+        '<pre class="moz-quote-pre" wrap="">Firma</pre></blockquote>'
+    ), s.quote_html(lines)
+    # format=flowed: soft breaks rejoined, space-stuffed '>' kept as text, quoted lines joined per level.
+    flowed = "Hola: esta es una prueba. El \ntexto sigue aquí.\n\nEl 25/11/2026 escribió:\n >\n> Cita larga \n> que sigue.\n-- \nDani"
+    assert s.quote_lines(flowed, flowed=True) == [
+        (0, "Hola: esta es una prueba. El texto sigue aquí."), (0, ""), (0, "El 25/11/2026 escribió:"),
+        (0, ">"), (1, "Cita larga que sigue."), (0, "-- "), (0, "Dani")], s.quote_lines(flowed, flowed=True)
+    assert s.quote_lines("Pala \nbra", flowed=True, delsp=True) == [(0, "Palabra")]
+    # Text from the original is escaped, so it cannot add markup to the window.
+    html = s.quote_html(s.quote_lines('<script>alert(1)</script> & <a href="x">'))
+    assert "<script>" not in html and "&lt;script&gt;" in html and "&amp;" in html and "<a " not in html, html
+    msg = s.email.message_from_string('Content-Type: text/plain; charset="utf-8"; format=flowed; delsp=yes\n\nHola \n')
+    assert s.plain_flowed(msg) == (True, True)
+    assert s.plain_flowed(s.email.message_from_string("Content-Type: text/html\n\n<p>Hola</p>\n")) == (False, False)
+
+
 def test_reply_and_forward_tools():
-    from urllib.parse import unquote
+    from urllib.parse import parse_qs, unquote, urlsplit
 
     report = TMP / "outbox" / "informe final.pdf"
     launched: list[list[str]] = []
@@ -503,15 +566,24 @@ def test_reply_and_forward_tools():
         s._index = None  # reply() as the first call of a session must refresh the index itself
         text = "Gracias, Ana.\nLo reviso esta semana."
         out = s.reply(id="INBOX#1", body=text)
+        url = urlsplit(launched[-1][2])
+        q = {k: v[0] for k, v in parse_qs(url.query).items()}
+        assert url.scheme == "mailto" and unquote(url.path) == "ana@example.org" and "cc" not in q, (url, q)
+        assert q["subject"] == "Re: Revisión del informe" and q["in-reply-to"] == "<m1@test>", q
+        html = q["html-body"]
+        assert html.startswith('Gracias, Ana.<br>Lo reviso esta semana.<br><br><div class="moz-cite-prefix">On '), html
+        assert 'Ana Martínez wrote:<br></div><blockquote type="cite"><pre class="moz-quote-pre" wrap="">Hola Alex' in html, html
+        assert "\n" not in html.split("<blockquote")[0], "no raw line breaks outside the quote"
+        assert clipboard == [] and "text already in it" in out and "Nothing has been sent" in out, out
+        s.reply(id="INBOX#3", body="Visto.")
+        q = {k: v[0] for k, v in parse_qs(urlsplit(launched[-1][2]).query).items()}
+        assert q["subject"] == "Re: Revisión del informe" and q["references"] == "<m1@test> <m3@test>", q
+        s.reply(id="INBOX#1", reply_all=False, body="Va el informe.", attachments=[str(report)])
         f = fields()
-        assert f["type"] == "2" and f["originalMsgURI"] == "imap-message://alex%40example.org@imap.example.org/INBOX#1", f
-        assert "body" not in f and clipboard == [text], "reply text must go to the clipboard, not the command line"
-        assert "reply-all" in out and "on the clipboard" in out and "Nothing has been sent" in out, out
-        s.reply(id="INBOX#1", reply_all=False, attachments=[str(report)])
-        f = fields()
-        assert f["type"] == "1" and f["attachment"] == report.resolve().as_uri() and len(clipboard) == 1
+        assert f["type"] == "1" and f["originalMsgURI"] == "imap-message://alex%40example.org@imap.example.org/INBOX#1", f
+        assert f["attachment"] == report.resolve().as_uri() and "body" not in f and clipboard == ["Va el informe."]
         s.copy_to_clipboard = lambda text: False
-        assert "could not be put on the clipboard" in s.reply(id="INBOX#2", body="Recibido.")
+        assert "could not be put on the clipboard" in s.reply(id="INBOX#2", body="Recibido.", attachments=[str(report)])
         out = s.forward(id="INBOX#3", to="luis@example.org", body="Te reenvío los ficheros.")
         f = fields()
         assert f["type"] == "3" and f["to"] == "luis@example.org" and f["body"] == "Te reenvío los ficheros.", f
@@ -531,6 +603,49 @@ def test_reply_and_forward_tools():
     assert "\treply\twindow opened" in log and "\tforward\twindow opened" in log
     for phrase in ("Gracias, Ana", "Te reenvío", "Borrador rechazado"):
         assert phrase not in log, f"text being written reached audit.log: {phrase!r}"
+
+
+def test_save_attachment():
+    saved = TMP / "saved"
+    fresh_index()
+    raises(lambda: s.save_attachment(id="INBOX#3", attachment="notes.txt"), "switched off")
+    try:
+        write_config(save=f"'{saved.as_posix()}'")
+        fresh_index()
+        out = s.save_attachment(id="INBOX#3", attachment="notes.txt")
+        first = saved / "notes.txt"
+        assert str(first) in out and first.read_bytes().decode("utf-8") == "nota de campo: floración 12 de marzo", out
+        s.save_attachment(id="INBOX#3", attachment="notes.txt")
+        assert (saved / "notes (1).txt").is_file(), "an existing file must never be overwritten"
+        s.save_attachment(id="INBOX#3", attachment="4")
+        assert (saved / "paper.pdf").read_bytes().startswith(b"%PDF")
+        if sys.platform == "win32":
+            mark = Path(f"{saved / 'paper.pdf'}:Zone.Identifier").read_text(encoding="ascii")
+            assert "ZoneId=3" in mark, "Windows must see the file as downloaded from the Internet"
+        raises(lambda: s.save_attachment(id="INBOX#4"), "privacy filter")
+        raises(lambda: s.save_attachment(id="INBOX#1"), "no attachments")
+        write_config(save=f"'{saved.as_posix()}'", bodies="['floración 12']")
+        fresh_index()
+        raises(lambda: s.save_attachment(id="INBOX#3", attachment="notes.txt"), "body rule")
+        write_config(save=f"'{(PROFILE / 'drop').as_posix()}'")
+        fresh_index()
+        raises(lambda: s.save_attachment(id="INBOX#3", attachment="notes.txt"), "Thunderbird profile")
+        write_config(save="'relative/folder'")
+        fresh_index()
+        raises(lambda: s.save_attachment(id="INBOX#3", attachment="notes.txt"), "absolute")
+        assert not (PROFILE / "drop").exists(), "nothing may be written into the profile"
+    finally:
+        write_config()
+        fresh_index()
+    assert s.safe_filename("../../evil.exe") == "evil.exe"
+    assert s.safe_filename("C:\\Users\\x\\CON.txt") == "_CON.txt"
+    assert s.safe_filename('a<b>:c?.pdf') == "a_b__c_.pdf"
+    assert s.safe_filename("factura" + chr(0x202E) + "fdp.exe") == "facturafdp.exe", "bidi overrides hide the real extension"
+    assert s.safe_filename("  .bashrc ") == "_.bashrc" and s.safe_filename("") == "attachment"
+    long = s.safe_filename("x" * 300 + ".pdf")
+    assert len(long) <= 150 and long.endswith(".pdf")
+    log = (Path(os.environ["TB_DATA_DIR"]) / "audit.log").read_text(encoding="utf-8")
+    assert "\tsave_attachment\tsaved\t" in log and "nota de campo" not in log
 
 
 def test_audit_log_has_no_mail_text():
@@ -785,7 +900,10 @@ MUTATING = [
     test_compose_attachment_rules,
     test_compose_tool_with_attachments,
     test_accounts_and_message_uris,
+    test_reply_recipients_and_quote,
+    test_reply_quote_as_thunderbird_writes_it,
     test_reply_and_forward_tools,
+    test_save_attachment,
     test_audit_log_has_no_mail_text,
 ]
 REVIEW = [

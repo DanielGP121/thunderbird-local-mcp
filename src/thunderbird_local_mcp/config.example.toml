@@ -52,3 +52,15 @@ whole_thread = true
 # Use single quotes for Windows paths.
 # Example: attachment_dirs = ['C:\Users\me\Documents\To send', '~/Documents/to-send']
 attachment_dirs = []
+
+# Line that reply() writes above the quoted original. Placeholders: {date} (dd/mm/yyyy), {time}
+# (hh:mm) and {sender} (name, or address when there is no name).
+# Example in Spanish: reply_header = 'El {date} a las {time}, {sender} escribió:'
+reply_header = 'On {date} {time}, {sender} wrote:'
+
+[attachments]
+# Folder save_attachment() writes attachments into, created if missing. Empty: saving is refused.
+# It cannot point into the Thunderbird profile or this server's own folders. Files are never
+# overwritten. Use single quotes for Windows paths.
+# Example: save_dir = 'C:\Users\me\Downloads\From mail'
+save_dir = ''

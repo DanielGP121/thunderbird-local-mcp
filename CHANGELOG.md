@@ -2,6 +2,14 @@
 
 All notable changes to this project are listed here. Versions follow [Semantic Versioning](https://semver.org/).
 
+## 0.5.0 (2026-11-26)
+
+- `reply` opens with the assistant's text already in the window. Without attachments it builds a `mailto:` reply with `In-Reply-To` and `References` (Thunderbird 160 keeps them, so the reply stays in the conversation), the recipients (`Reply-To` or sender, plus To and Cc for a reply to all, minus the user's own addresses from `prefs.js`) and, below a header line, the original quoted as Thunderbird's Reply button quotes it: an HTML body (`html-body`) with a `blockquote type="cite"`, nested once more for each earlier quote level. A `format=flowed` original is unwrapped first, and lines that were only typed with a `>` stay text. A quote passed as plain text arrived as literal `>` characters, because Thunderbird space-stuffs such lines when it sends `format=flowed`. The original is not marked as replied in this mode.
+- A reply with attachments still uses Thunderbird's own reply window, the only one that takes attachments, with the text on the clipboard.
+- New `[compose] reply_header` setting for the line above the quote, with `{date}`, `{time}` and `{sender}`.
+- Long originals are quoted only in part so the window still opens; the reply text is never cut.
+- New `save_attachment` tool: writes an attachment as the original file into the folder set in the new `[attachments] save_dir` setting (off until set). It never overwrites, cleans the sender's file name (folders, reserved names, hidden dot-files, bidirectional overrides), marks the file as downloaded from the Internet on Windows, refuses excluded messages and, like `read_attachment`, attachments whose text matches a body rule. Add `mcp__thunderbird__save_attachment` to your client's "ask" rules.
+
 ## 0.4.0 (2026-11-25)
 
 - New `reply` tool: opens Thunderbird's own reply window for a message id, so the reply stays in the same conversation, quotes the original and is marked as replied once sent. Reply-all by default, sender only on request, attachments from allowed folders. Thunderbird drops text passed to a reply window, so the reply text is copied to the clipboard for the user to paste.
